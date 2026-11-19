@@ -51,6 +51,13 @@ Source  ahrens2017            [o] 元のページを開く
 
 - 判定 (リンク、Hub、出典の補完) は Haiku。`claude -p --model haiku` で呼び、JSON 配列だけを返させる。リンク判定の出力の形:
   `{"to": "<slug>", "kind": "supports|contradicts|extends|example_of|none", "reason": "<30字以内>"}`
+- 呼び出しの形 (2026-11-19 に 1 回試して動作を確認した。入力約 2,800 トークン、出力約 350 トークン):
+  `claude -p --model haiku --effort low --tools "" --strict-mcp-config --disable-slash-commands --no-session-persistence --system-prompt "<短い指示>" --json-schema '<JSON Schema>' --output-format json "<入力>"`
+  - effort は `low` (Haiku 5.5 の既定は `medium`。分類と抜き出しには `low` で足りる)
+  - `--system-prompt` で Claude Code の既定のシステムプロンプトを置き換え、`--tools ""` で道具を外して、入力トークンを減らす
+  - 結果は出力の JSON の `structured_output` から取る
+  - `--bare` は使わない (API キーでの認証しか受け付けず、契約の枠ではなく従量課金になるため)
+  - 試したときは理由が 30 字を大きく超えた。スキーマの `maxLength` と指示文で長さを抑える
 - 埋め込みはローカルの Ollama (`qwen3-embedding:0.6b`、1024 次元)。モデル名は設定で変えられるようにする (替えたら全ノートの埋め込みを作り直す)。Omnigraph の `openai-compatible` プロバイダで `http://localhost:11434/v1` を指す
 - 追加の費用はかけない
 
