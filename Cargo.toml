@@ -1,0 +1,15 @@
+[package]
+name = "zettelist"
+version = "0.1.0"
+edition = "2021"
+description = "Zettelkasten on Omnigraph の書き込みと整理の道具"
+
+[[bin]]
+name = "zl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.8", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2"
