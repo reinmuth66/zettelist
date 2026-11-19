@@ -51,7 +51,7 @@ Source  ahrens2017            [o] 元のページを開く
 
 - 判定 (リンク、Hub、出典の補完) は Haiku。`claude -p --model haiku` で呼び、JSON 配列だけを返させる。リンク判定の出力の形:
   `{"to": "<slug>", "kind": "supports|contradicts|extends|example_of|none", "reason": "<30字以内>"}`
-- 埋め込みはローカルの Ollama (`bge-m3`)。Omnigraph の `openai-compatible` プロバイダで `http://localhost:11434/v1` を指す
+- 埋め込みはローカルの Ollama (`qwen3-embedding:0.6b`、1024 次元)。モデル名は設定で変えられるようにする (替えたら全ノートの埋め込みを作り直す)。Omnigraph の `openai-compatible` プロバイダで `http://localhost:11434/v1` を指す
 - 追加の費用はかけない
 
 ## Omnigraph について分かっていること
