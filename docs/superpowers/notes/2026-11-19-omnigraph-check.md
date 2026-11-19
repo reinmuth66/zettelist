@@ -10,6 +10,8 @@
 
 ## サーバーの立て方 (確認 4)
 
+手順 1 から 5 は実際に行った。「cluster 設定からしか起動できない」「スキーマの変更は main だけ」は skill の記述による (試していない)。
+
 サーバーは cluster 設定からしか起動できない。単独のグラフを公開するモードはない。
 
 ```
@@ -29,7 +31,7 @@ spike/cluster/schema.pg
 
 ## 確認 1: できる操作
 
-CLI を server target に向けると、次はすべて動いた。CLI はサーバーの HTTP (`POST /query`、`POST /mutate` など) を呼んでいる。
+CLI を server target に向けると、次はすべて動いた。HTTP を直接呼ぶ形は試していない (CLI が HTTP を使うことは skill の記述による)。
 
 | 操作 | コマンド | 結果 |
 |---|---|---|
@@ -48,7 +50,7 @@ CLI を server target に向けると、次はすべて動いた。CLI はサー
 - `branch merge main into review` で main を review に取り込むと (`fast_forward`)、書けるようになる
 - review の内容を main にマージするとき、main がその間に進んでいても `merged` になる
 
-結論: review は常にある 1 本のブランチでよい。提案を書く前に、毎回 main を review に取り込む。
+結論: review は常にある 1 本のブランチでよさそうだが、試したのは 1 往復だけ。2 回目以降の往復、却下したエッジを消してからのマージ、同じリンクの重複は未確認 (設計書の「まだ確かめていないこと」)。提案を書く前に、毎回 main を review に取り込む。
 
 ## 確認 3: 埋め込みと近さ
 

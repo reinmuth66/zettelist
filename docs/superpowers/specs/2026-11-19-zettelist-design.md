@@ -52,8 +52,9 @@ edge Links: Permanent -> Permanent {
   similarity: F32        // 提案したときのベクトルの近さ (型は Omnigraph で使えるものを builder が選ぶ)
 }
 
-node Fleeting   { ... embedding: Vector(1024) }   // 追加。inbox で似ているノートを示すため
-node Literature { ... embedding: Vector(1024) }   // 追加
+node Fleeting   { ... embedding: Vector(1024)? }  // 追加。inbox で似ているノートを示すため
+node Literature { ... embedding: Vector(1024)? }  // 追加
+node Permanent  { ... embedding: Vector(1024)? }  // null を許すように変える (worker が後から書き足すため)
 ```
 
 `kind` はなくす。`provenance` の取得元の値から `LLM` がなくなり、`dict` (辞書で読みを取った) が加わる。
@@ -268,6 +269,7 @@ inbox:
 | 処理 | きっかけ |
 |---|---|
 | 出典の登録 | 未登録の出典つきでメモを書いたとき |
+| 埋め込み | メモを書いたとき、昇格したとき |
 | リンクの候補探し、Hub の振り分け | 昇格したとき |
 | バックアップ | `m` でマージしたとき |
 
@@ -353,7 +355,8 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 ```
 
 - 埋め込み (確認で分かったこと。`docs/superpowers/notes/2026-11-19-omnigraph-check.md`):
-  - 書き込み時に Omnigraph は埋め込みを作らない。zl が Ollama の `POST /v1/embeddings` で作り、書き込みの `embedding` に入れる。設定の `[embed]` で URL とモデルを決める
+  - 書き込み時に Omnigraph は埋め込みを作らない。zl の側でベクトルを用意する。方法は 2 つあり、builder が選ぶ: (a) zl が Ollama の `POST /v1/embeddings` を直接呼ぶ (設定の `[embed]` で URL とモデルを決める)。(b) zl が `omnigraph embed --input <jsonl> --output <jsonl> --spec <json>` をサブプロセスで呼ぶ (環境変数 `OMNIGRAPH_EMBED_PROVIDER=openai-compatible`、`OMNIGRAPH_EMBED_BASE_URL=http://localhost:11434/v1`、`OMNIGRAPH_EMBED_MODEL=qwen3-embedding:0.6b` で設定)。(b) は確認していない
+  - 書き込みは Ollama を待たない。`embedding` は null を許す (`Vector(1024)?`)。メモと Permanent はベクトルなしですぐに保存し、埋め込みは待ち行列に積んで worker が後から書き足す。`nearest` は null のベクトルを飛ばすので、埋め込みがまだのノートは似ているノートの表示とリンクの候補に出ないだけで済む (確認 3a で null のまま書けることを確かめた)。昇格のあとのリンクの候補探しは、その Permanent の埋め込みを作ってから行う
   - 検索で `nearest` にテキストを渡すと、サーバーが cluster.yaml の `providers.embedding` で埋め込みにする。zl の `[embed].model` と cluster.yaml の `model` は同じものにする (違うと検索が狂う)。zl は検索でもベクトルを自分で作って渡してよい (`$v: Vector(1024)`)。どちらにするかは builder が決める
   - 近さ: `nearest(...) as distance` は 2 乗ユークリッド距離 (0 から 4)。zl は `similarity = 1 - distance / 2` (コサイン類似度) に直して扱う。`min_similarity`、`inbox_similarity`、Links の `similarity` はこの値
   - モデルを替えたら全ノートの埋め込みを作り直す (`zl --reembed`)
@@ -365,7 +368,7 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 - Rust + ratatui。1 つのバイナリで TUI、書き込み、worker を受け持つ
 - Omnigraph には `omnigraph-server` の HTTP でつなぐ。HTTP の呼び出しは 1 か所にまとめ、後で SDK などに差し替えられるようにする
 - LLM は使わない。Ollama は埋め込みのためだけに使い、zl (書き込み) と omnigraph-server (テキストでの検索) から呼ばれる
-- Omnigraph には CLI (`omnigraph --target <server target>`) をサブプロセスで呼ぶか、サーバーの HTTP (`POST /query`、`POST /mutate`) を直接呼ぶ。確認では CLI ですべての操作ができた。どちらにするかは builder が決める。どちらでも呼び出しは 1 か所にまとめる
+- Omnigraph には CLI (`omnigraph --target <server target>`) をサブプロセスで呼ぶ。確認で全操作ができたのは CLI だけで、HTTP を直接呼ぶ形は試していない。呼び出しは 1 か所にまとめ、後で HTTP や SDK に差し替えられるようにする
 - omnigraph-server は cluster 設定からしか起動できない。cluster.yaml (グラフ、スキーマ、埋め込みプロバイダ) を置き、`cluster apply` でグラフを作り、apply のロックを外してから `omnigraph-server --cluster file://<data> --bind 127.0.0.1:8080 --unauthenticated` で起動する。手順は確認の記録にある。cluster.yaml とスキーマはデータ用リポジトリに置く (builder が場所を決める)
 - スキーマの変更は、生きているブランチが main だけのときにしかできない。zl のスキーマを変えるときは review ブランチをいったん消す
 - 開発環境とビルドは nix flake。`devShells` に Rust のツールチェーン、`omnigraph` / `omnigraph-server`、`ollama` を入れる。`packages` でバイナリを出し、dotfiles から入れる
@@ -389,7 +392,7 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 | リンクの種類 | 種類なし | Discourse Graph の 3 種類 (`supports / opposes / informs`): 裏付けはあるが少数派で、小型モデルでは外れやすい。今の 4 種類: 定義の裏付けがない。Markdown で Zettelkasten をする人の主流は種類なしで、文脈は文章で書く |
 | リンクの理由 | 書きたいときだけ、レビューの 1 行の入力欄で | 本文に文章で書く: 手間が大きい。書かない: 何も残らない |
 | 接続 | 常駐の `omnigraph-server` | ファイル直接: Studio を使うときだけサーバーを立てることになり、同時の書き込みが安全か分からない |
-| 埋め込みを作る側 | zl (書き込み時) とサーバー (テキストでの検索時) | サーバーだけ: 書き込み時に Omnigraph は埋め込みを作らないため、できない (確認で判明。当初はこれを選んでいた) |
+| 埋め込みを作る側 | zl の側 (書き込み時、worker が後から) とサーバー (テキストでの検索時) | サーバーだけ: 書き込み時に Omnigraph は埋め込みを作らないため、できない (確認で判明。当初はこれを選んでいた)。書き込みのその場で作る: Ollama が止まっていると書き込めず、「すぐに戻る」に反する |
 | 裏の処理 | 待ち行列と、必要なときだけ動く worker | launchd での常駐: 常駐が 2 つになる。その場で処理: 待たされる |
 | バックアップ | マージのたび | 1 日 1 回: その日のうちに戻せない。手動だけ: 忘れる |
 | 未登録の出典 | Source の ID を元の値から作り、slug を項目にする | 仮の slug で作り後で付け替える: ほとんどの出典で付け替えが起きる。書くときにその場で書誌を取る: 1〜3 秒待たされ、オフラインでは結局付け替えが要る。出典が登録されるまで Fleeting にする: その間出典なしに見える。`@card(0..1)` にゆるめる: 出典のない Literature ができる |
@@ -412,6 +415,16 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 2. review ブランチ: review は常にある 1 本のブランチとする。ブランチは作った時点の main しか見ないので、main にだけある Permanent へのリンクは書けない。**提案を review に書く前に、毎回 `branch merge main into review` で main を取り込む**。review を main にマージするとき、main が先に進んでいても問題ない。採用 / 却下の印は zl の手元 (待ち行列と同じ場所) に持ち、`m` のときに採用したものだけを main に入れる (却下したものは review から消してからマージする)
 3. 埋め込みは書き込み時に自動では入らない。zl が作る (「設定」の節)。`nearest` の距離は取れるので、`min_similarity` での足切りはそのままできる
 4. 待ち受けは `--bind 127.0.0.1:8080` で決める。設定の `server` の初期値は `http://127.0.0.1:8080` のまま
+
+### まだ確かめていないこと (計画 2 の最初に確かめる)
+
+確認 2 で試したのは「main を review に取り込む」と「review を main にマージする」の 1 往復だけ。review を 1 本で使い続ける前提には、次の 3 点が要る。
+
+1. review を main にマージしたあと、もう一度 main を review に取り込み、提案を書けるか (2 回目以降の往復)
+2. 却下した提案のエッジを review から消してから、review を main にマージできるか
+3. 同じ組のリンクをもう一度提案したとき、エッジが重複しないか。`@key` のないエッジは insert のたびに増えるので、`Links` に `@key(@src, @dst)` を付けるかを決める (付けると同じ組は upsert になる)
+
+ほかに、`omnigraph embed` を使う方法 (埋め込みの方法 b) を選ぶなら、それも確かめる。
 
 ## 未確認事項
 
