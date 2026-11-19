@@ -1,0 +1,7 @@
+version: 1
+targets:
+  local:
+    kind: server
+    endpoint: http://127.0.0.1:8080
+    auth: {provider: anonymous}
+    default_graph: zettelkasten

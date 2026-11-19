@@ -335,6 +335,10 @@ graph  = "zettelkasten"            # サーバー上のグラフ名。各自が�
 repo = "~/ghq/github.com/reinmuth66/zettelkasten"   # データ用リポジトリ
 push = false                                        # true でマージのたびに push
 
+[embed]
+ollama = "http://localhost:11434"   # 書き込みのときに zl が埋め込みを作る
+model  = "qwen3-embedding:0.6b"     # cluster.yaml の providers.embedding の model と同じにする
+
 [link]
 candidates       = 5      # 1 回の昇格で提案するリンクの最大数
 min_similarity   = 0.0    # これ未満の近さの候補は出さない。仮の値。Permanent がたまってから決める
@@ -348,7 +352,11 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 [keys]                    # キー割り当て。形式は builder が決める
 ```
 
-- 埋め込みは `omnigraph-server` 側で作る (設計者の判断)。`nearest` にテキストを渡すとサーバーの設定したプロバイダが埋め込みにするので、zl は Ollama の埋め込みを直接呼ばない。モデルは launchd の環境変数 (`OMNIGRAPH_EMBED_PROVIDER=openai-compatible`、`OMNIGRAPH_EMBED_BASE_URL=http://localhost:11434/v1`、`OMNIGRAPH_EMBED_MODEL=qwen3-embedding:0.6b`) で決め、dotfiles で設定する。モデルを替えたら全ノートの埋め込みを作り直す (`zl --reembed`)。書き込み時にサーバーが埋め込みを自動で作るか、zl がクエリで作らせるかは、最初の確認で調べる
+- 埋め込み (確認で分かったこと。`docs/superpowers/notes/2026-11-19-omnigraph-check.md`):
+  - 書き込み時に Omnigraph は埋め込みを作らない。zl が Ollama の `POST /v1/embeddings` で作り、書き込みの `embedding` に入れる。設定の `[embed]` で URL とモデルを決める
+  - 検索で `nearest` にテキストを渡すと、サーバーが cluster.yaml の `providers.embedding` で埋め込みにする。zl の `[embed].model` と cluster.yaml の `model` は同じものにする (違うと検索が狂う)。zl は検索でもベクトルを自分で作って渡してよい (`$v: Vector(1024)`)。どちらにするかは builder が決める
+  - 近さ: `nearest(...) as distance` は 2 乗ユークリッド距離 (0 から 4)。zl は `similarity = 1 - distance / 2` (コサイン類似度) に直して扱う。`min_similarity`、`inbox_similarity`、Links の `similarity` はこの値
+  - モデルを替えたら全ノートの埋め込みを作り直す (`zl --reembed`)
 - 公開を考え、各項目に既定値を持たせる。設定ファイルがなくても既定値で動く
 - エディタは環境変数 `$EDITOR` に従う
 
@@ -356,7 +364,10 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 
 - Rust + ratatui。1 つのバイナリで TUI、書き込み、worker を受け持つ
 - Omnigraph には `omnigraph-server` の HTTP でつなぐ。HTTP の呼び出しは 1 か所にまとめ、後で SDK などに差し替えられるようにする
-- LLM は使わない。Ollama は埋め込みのためだけに使い、omnigraph-server から呼ばれる
+- LLM は使わない。Ollama は埋め込みのためだけに使い、zl (書き込み) と omnigraph-server (テキストでの検索) から呼ばれる
+- Omnigraph には CLI (`omnigraph --target <server target>`) をサブプロセスで呼ぶか、サーバーの HTTP (`POST /query`、`POST /mutate`) を直接呼ぶ。確認では CLI ですべての操作ができた。どちらにするかは builder が決める。どちらでも呼び出しは 1 か所にまとめる
+- omnigraph-server は cluster 設定からしか起動できない。cluster.yaml (グラフ、スキーマ、埋め込みプロバイダ) を置き、`cluster apply` でグラフを作り、apply のロックを外してから `omnigraph-server --cluster file://<data> --bind 127.0.0.1:8080 --unauthenticated` で起動する。手順は確認の記録にある。cluster.yaml とスキーマはデータ用リポジトリに置く (builder が場所を決める)
+- スキーマの変更は、生きているブランチが main だけのときにしかできない。zl のスキーマを変えるときは review ブランチをいったん消す
 - 開発環境とビルドは nix flake。`devShells` に Rust のツールチェーン、`omnigraph` / `omnigraph-server`、`ollama` を入れる。`packages` でバイナリを出し、dotfiles から入れる
 - `omnigraph-server` の常駐 (launchd) は dotfiles で行う。この文書の範囲外
 - 外部の API (Crossref、openBD、Google Books、arXiv) は無料の公開 API。キーは要らない
@@ -378,6 +389,7 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 | リンクの種類 | 種類なし | Discourse Graph の 3 種類 (`supports / opposes / informs`): 裏付けはあるが少数派で、小型モデルでは外れやすい。今の 4 種類: 定義の裏付けがない。Markdown で Zettelkasten をする人の主流は種類なしで、文脈は文章で書く |
 | リンクの理由 | 書きたいときだけ、レビューの 1 行の入力欄で | 本文に文章で書く: 手間が大きい。書かない: 何も残らない |
 | 接続 | 常駐の `omnigraph-server` | ファイル直接: Studio を使うときだけサーバーを立てることになり、同時の書き込みが安全か分からない |
+| 埋め込みを作る側 | zl (書き込み時) とサーバー (テキストでの検索時) | サーバーだけ: 書き込み時に Omnigraph は埋め込みを作らないため、できない (確認で判明。当初はこれを選んでいた) |
 | 裏の処理 | 待ち行列と、必要なときだけ動く worker | launchd での常駐: 常駐が 2 つになる。その場で処理: 待たされる |
 | バックアップ | マージのたび | 1 日 1 回: その日のうちに戻せない。手動だけ: 忘れる |
 | 未登録の出典 | Source の ID を元の値から作り、slug を項目にする | 仮の slug で作り後で付け替える: ほとんどの出典で付け替えが起きる。書くときにその場で書誌を取る: 1〜3 秒待たされ、オフラインでは結局付け替えが要る。出典が登録されるまで Fleeting にする: その間出典なしに見える。`@card(0..1)` にゆるめる: 出典のない Literature ができる |
@@ -392,14 +404,14 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 - Crossref の `type` と `kind` の対応表、URL のドメインと `kind` の対応表
 - ISBN の書誌検索ページの URL
 
-## 最初の確認 (実装の計画の第 1 段で行う)
+## 最初の確認の結果 (2026-11-20)
 
-次のことは Omnigraph と Ollama を入れて試すまで分からない。計画の最初に短い確認を行い、結果でこの文書を直してから本体を作る。
+詳細は `docs/superpowers/notes/2026-11-19-omnigraph-check.md`。
 
-1. `omnigraph-server` の HTTP API で、ブランチの作成とマージ、差分、書き込み (load / mutation)、export、ベクトル検索ができるか。足りない操作があれば、CLI を `--target <server>` でサーバーに向けて使う (ファイル直接の操作はしない)
-2. review ブランチの持ち方。案: review は常にある 1 本のブランチとし、マージの後に main から作り直す。main にだけある新しい Permanent へのリンクを review に載せられるか (ブランチは main の最新を見られるか、取り込みの操作が要るか) を確かめる。載せられなければ、提案は zl の手元 (待ち行列と同じ場所) に持ち、`m` のときに main へ 1 回で書き込む形に切り替える。採用 / 却下の印は、どちらの形でも zl の手元に持つ
-3. 埋め込みを書き込み時にサーバーが自動で作るか。ベクトル検索の結果に近さの値が付いてくるか (付かなければ、`min_similarity` での足切りの方法を考え直す)
-4. `omnigraph-server` の待ち受けの既定のポートと、グラフの作り方。設定の `server` の初期値はそれに合わせる
+1. 必要な操作 (書き込み、ブランチの作成とマージ、差分、export、ベクトル検索) は、CLI を server target に向けるとすべてできた。`@card(1..1)` はサーバーでも守られる
+2. review ブランチ: review は常にある 1 本のブランチとする。ブランチは作った時点の main しか見ないので、main にだけある Permanent へのリンクは書けない。**提案を review に書く前に、毎回 `branch merge main into review` で main を取り込む**。review を main にマージするとき、main が先に進んでいても問題ない。採用 / 却下の印は zl の手元 (待ち行列と同じ場所) に持ち、`m` のときに採用したものだけを main に入れる (却下したものは review から消してからマージする)
+3. 埋め込みは書き込み時に自動では入らない。zl が作る (「設定」の節)。`nearest` の距離は取れるので、`min_similarity` での足切りはそのままできる
+4. 待ち受けは `--bind 127.0.0.1:8080` で決める。設定の `server` の初期値は `http://127.0.0.1:8080` のまま
 
 ## 未確認事項
 

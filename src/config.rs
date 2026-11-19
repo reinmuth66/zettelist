@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub omnigraph: OmnigraphConfig,
     pub backup: BackupConfig,
+    pub embed: EmbedConfig,
     pub link: LinkConfig,
     pub ui: UiConfig,
 }
@@ -35,6 +36,24 @@ impl Default for OmnigraphConfig {
 pub struct BackupConfig {
     pub repo: Option<PathBuf>,
     pub push: bool,
+}
+
+/// 書き込みのときに zl が埋め込みを作る Ollama。model は cluster.yaml の
+/// providers.embedding と同じにする。
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct EmbedConfig {
+    pub ollama: String,
+    pub model: String,
+}
+
+impl Default for EmbedConfig {
+    fn default() -> Self {
+        Self {
+            ollama: "http://localhost:11434".to_string(),
+            model: "qwen3-embedding:0.6b".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +141,13 @@ mod tests {
         assert!(!c.backup.push);
         assert_eq!(c.link.candidates, 5);
         assert!(!c.ui.locator);
+    }
+
+    #[test]
+    fn embed_defaults_to_local_ollama_model() {
+        let c = Config::from_toml_str("", Path::new("/home/u")).unwrap();
+        assert_eq!(c.embed.ollama, "http://localhost:11434");
+        assert_eq!(c.embed.model, "qwen3-embedding:0.6b");
     }
 
     #[test]
