@@ -27,7 +27,7 @@
 2. 設定ファイルの `~` で始まるパス (`backup.repo`) → ホームディレクトリに展開される
 3. 設定ファイルの書式が壊れている → どの行が悪いかを示して終了し、黙って既定値で動かない
 4. 設定ファイルに知らない項目がある (`[theme]`、`[keys]` は計画 2 で中身を決める) → エラーにせず読み飛ばす
-5. omnigraph が nixpkgs にない → flake で配布物から入れ、devShell で `omnigraph --version` と `omnigraph-server --version` が通る
+5. omnigraph を flake の input からビルドする → devShell で `omnigraph --version` と `omnigraph-server --version` が通る
 
 ---
 
@@ -42,7 +42,7 @@
 
 - [ ] **Step 1: `flake.nix` を書く**
 
-`devShells.default` に Rust のツールチェーン (cargo, rustc, clippy, rustfmt, rust-analyzer)、`ollama`、`omnigraph` と `omnigraph-server` を入れる。omnigraph は nixpkgs になければ、GitHub の配布物 (ModernRelay/omnigraph のリリースの aarch64-darwin 版) を `fetchurl` して入れる derivation を flake の中に書く。版は書いた時点の最新に固定する。`packages.default` は `rustPlatform.buildRustPackage` で `zl` を出す。
+`devShells.default` に Rust のツールチェーン (cargo, rustc, clippy, rustfmt, rust-analyzer)、`ollama`、omnigraph を入れる。omnigraph は flake の input `omnigraph.url = "github:ModernRelay/omnigraph/v0.15.0"` とし、`omnigraph.packages.${system}.default` を使う (このパッケージ 1 つに `omnigraph` と `omnigraph-server` の両方が入る。v0.15.0 のタグに flake があることを 2026-11-19 に確認)。バイナリのキャッシュはなく、手元でソースからビルドするので、初回は時間がかかる。`packages.default` は `rustPlatform.buildRustPackage` で `zl` を出す。
 
 - [ ] **Step 2: devShell が通ることを確かめる**
 
