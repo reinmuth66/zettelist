@@ -20,12 +20,12 @@ spike/cluster/schema.pg
 ```
 
 1. `omnigraph cluster validate --config ./cluster`
-2. `omnigraph cluster apply --target ./data --config ./cluster --as <actor> --json` でグラフを作る
-3. apply が持ったままのロックを外す: `omnigraph cluster status --target ./data --json` の `lock_id` を `omnigraph cluster force-unlock <lock_id> --target ./data`
+2. `omnigraph cluster apply --target ./data --config ./cluster --as <actor> --json` でグラフを作る。`./data` は先に作っておく (ないと `storage_root_invalid`)
+3. apply が持ったままのロックを外す: `omnigraph cluster status --target ./data --json` の `lock_id` を `omnigraph cluster force-unlock <lock_id> --target ./data`。status の JSON は複数行に整形されて出るので、1 行を前提に切り出さない (外し忘れると、サーバーは `state_lock_held` で起動しない)
 4. `omnigraph-server --cluster file:///<絶対パス>/data --bind 127.0.0.1:8080 --unauthenticated`
 5. CLI からは operator 設定の server target (`kind: server`、`endpoint: http://127.0.0.1:8080`、`auth: {provider: anonymous}`、`default_graph: zettelkasten`) で使う。HTTP の平文は loopback の anonymous のときだけ許される
 
-- 待ち受けは `--bind` で決める。既定値は確かめていないので、launchd では必ず `--bind 127.0.0.1:8080` を付ける
+- 待ち受けは `--bind` で決める。既定値は `127.0.0.1:8080` (2026-11-20 に `--bind` なしで起動して確かめた。環境変数 `OMNIGRAPH_LISTEN_ADDR` でも変えられる)。既定値に頼らず、launchd では `--bind 127.0.0.1:8080` を明示する
 - 埋め込みプロバイダは cluster.yaml の `providers.embedding` に書き、グラフの `embedding_provider` で結ぶ。`api_key` は `${環境変数}` で必須なので、Ollama でも `OLLAMA_API_KEY=ollama` などのダミーを渡す
 - スキーマの変更は main だけで行い、生きているブランチが 1 本のときにしかできない (skill の記述)。スキーマを変えるときは review ブランチをいったん消す
 

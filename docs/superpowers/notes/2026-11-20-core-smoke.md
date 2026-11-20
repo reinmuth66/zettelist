@@ -22,4 +22,5 @@
 ## 気づいたこと
 
 - Omnigraph Studio から作業用のサーバーを開けなかった。`omnigraph studio --target zl` のリンクは出たが、Studio は自分の設定フォルダの接続先を読むため、作業用の operator 設定は使われない。Studio の画面で接続先を足そうとすると name と bearer token を求められ、足せなかった (認証なしのサーバーでも任意の token で HTTP は通ることは確かめた)。本番で launchd から常駐させるときに、Studio からの接続方法 (token を設定するか、`~/.omnigraph` に接続先を置くか) を決める必要がある
-- `cluster apply` の前にデータのフォルダを作る必要がある (確認の記録の手順に足すとよい)
+  - 追記 (2026-11-20): `omnigraph studio --help` によると、Studio はリンクに入った target 名を、自分の operator home (既定は `~/.omnigraph`) で解決し直し、接続先の内容の digest が合わなければ開かない。zl は自分の状態フォルダの `operator.yaml` を使うので、そのままでは合わない。本番では `~/.omnigraph` に zl と同じ target `zl` (`kind: server`、`endpoint`、`auth: {provider: anonymous}`、`default_graph`) を置けば開けるはず (Studio の画面では確かめていない)
+- `cluster apply` の前にデータのフォルダを作る必要がある (確認の記録の手順に足した)
