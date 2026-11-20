@@ -165,3 +165,13 @@ fn backup_without_repo_exits_nonzero() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("backup.repo が設定されていません"), "stderr: {stderr}");
 }
+
+#[test]
+fn locator_without_source_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl(dir.path()).args(["-p", "p.42", "x"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--source"), "stderr: {stderr}");
+    assert!(pending(dir.path()).is_empty());
+}

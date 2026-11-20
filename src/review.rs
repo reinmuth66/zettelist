@@ -182,6 +182,24 @@ pub fn lock_review(path: &Path) -> Result<File, Error> {
     crate::paths::lock_file(path)
 }
 
+/// main の Permanent と Hub の slug。
+fn main_nodes(og: &Omnigraph) -> Result<(HashSet<String>, HashSet<String>), Error> {
+    let slugs = |node: &str| -> Result<HashSet<String>, Error> {
+        let q = format!("query q() {{ match {{ $n: {node} }} return {{ $n.slug as slug }} }}");
+        Ok(og.query(MAIN, &q, json!({}))?.iter().map(|r| text(r, "slug")).collect())
+    };
+    Ok((slugs("Permanent")?, slugs("Hub")?))
+}
+
+/// 提案の両端 (Permanent と Hub) が main にあれば true。
+/// ないものを review に書くと、load が毎回 400 になって apply が終わらない。
+fn endpoints_exist(p: &Proposal, permanents: &HashSet<String>, hubs: &HashSet<String>) -> bool {
+    match p {
+        Proposal::Link { from, to, .. } => permanents.contains(from) && permanents.contains(to),
+        Proposal::Hub { hub, note } => hubs.contains(hub) && permanents.contains(note),
+    }
+}
+
 /// main にある Links と Includes の鍵
 fn main_keys(og: &Omnigraph) -> Result<HashSet<String>, Error> {
     let mut keys: HashSet<String> =
@@ -191,6 +209,12 @@ fn main_keys(og: &Omnigraph) -> Result<HashSet<String>, Error> {
 }
 
 /// 判断を main に反映する。何度呼んでも、途中から続きを終わらせる。
+///
+/// 呼ぶ側の注意:
+/// - `state_path` には必ず `Paths::review_json()` を渡すこと。ロックは `state_path` の隣の `review.lock`
+///   (`Paths::review_lock()` と同じ場所) を取るので、別の場所を渡すと worker と排他にならない。
+/// - 最後に `Job::Backup` を待ち行列に積むが、worker は起動しない。
+///   呼んだあとで `worker::spawn_worker` を呼ばないと、バックアップは次に worker が動くまで実行されない。
 pub fn apply(og: &Omnigraph, state_path: &Path, queue: &Queue) -> Result<Summary, Error> {
     // worker が review に提案を書く間は待つ。apply の間は worker も書けない
     let _lock = lock_review(&state_path.with_file_name("review.lock"))?;
@@ -206,6 +230,15 @@ pub fn apply(og: &Omnigraph, state_path: &Path, queue: &Queue) -> Result<Summary
     let proposals = list_proposals(og)?;
     {
         let ReviewState { decisions, reinsert } = &mut state;
+        // 端の Permanent や Hub が main から消えた提案は、書き戻せないので判断ごと捨てる
+        // (残すと review への load が毎回失敗して、apply が終わらない)
+        let (permanents, hubs) = main_nodes(og)?;
+        let dead: Vec<String> =
+            reinsert.iter().filter(|p| !endpoints_exist(p, &permanents, &hubs)).map(Proposal::key).collect();
+        reinsert.retain(|p| !dead.contains(&p.key()));
+        for key in &dead {
+            decisions.remove(key);
+        }
         reinsert.retain(|p| !matches!(decisions.get(&p.key()), Some(Decision::Reject)));
         for p in &proposals {
             let key = p.key();

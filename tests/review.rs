@@ -425,3 +425,35 @@ fn apply_waits_while_review_lock_is_held() {
     });
     assert!(done.load(Ordering::SeqCst));
 }
+
+/// main から Permanent を消す。
+fn delete_permanent(og: &Omnigraph, slug: &str) {
+    zettelist::notes::delete_notes(og, &[(NoteKind::Permanent, slug.to_string())]).unwrap();
+}
+
+#[test]
+fn undecided_reinsert_with_deleted_endpoint_is_dropped() {
+    let s = TestServer::start();
+    // 手順 3 のあと (review からは消えて reinsert にだけある) に、相手の Permanent が main から消えた
+    let (og, queue, _a, b, _x) = crashed_with_x_in_reinsert(&s, true);
+    delete_permanent(&og, &b);
+
+    apply(&og, &state_path(&s), &queue).unwrap();
+    assert!(links(&og, "main").is_empty());
+    assert!(list_proposals(&og).unwrap().is_empty());
+    assert_eq!(ReviewState::load(&state_path(&s)).unwrap(), ReviewState::default());
+}
+
+#[test]
+fn adopted_reinsert_with_deleted_endpoint_is_dropped() {
+    let s = TestServer::start();
+    let (og, queue, _a, b, x) = crashed_with_x_in_reinsert(&s, true);
+    save_decisions(&state_path(&s), vec![(&x, adopt())]);
+    delete_permanent(&og, &b);
+
+    let summary = apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(summary.links, 0);
+    assert!(links(&og, "main").is_empty());
+    assert!(list_proposals(&og).unwrap().is_empty());
+    assert_eq!(ReviewState::load(&state_path(&s)).unwrap(), ReviewState::default());
+}

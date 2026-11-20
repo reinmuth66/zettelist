@@ -17,7 +17,7 @@ struct Cli {
     source: Option<String>,
 
     /// 出典の中の位置 (ページなど)
-    #[arg(short = 'p', long = "locator", value_name = "位置")]
+    #[arg(short = 'p', long = "locator", value_name = "位置", requires = "source")]
     locator: Option<String>,
 
     /// 本文。`-` で始まるときは `--` のあとに置く

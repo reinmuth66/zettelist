@@ -29,6 +29,8 @@ impl Embedder for OllamaEmbedder {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(120)))
             .http_status_as_error(false)
+            // HTTP_PROXY / ALL_PROXY を読まない。ローカルの Ollama への通信をプロキシに回さない
+            .proxy(None)
             .build()
             .into();
         let url = format!("{}/v1/embeddings", self.base);
