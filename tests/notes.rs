@@ -1,10 +1,13 @@
 mod common;
 
 use chrono::{DateTime, Local, TimeZone, Utc};
-use common::TestServer;
+use common::{unit, TestServer};
 use serde_json::{json, Value};
 use zettelist::error::Error;
-use zettelist::notes::{delete_notes, inbox, promote, write_note, InboxItem, NewNote, NoteKind};
+use zettelist::notes::{
+    delete_notes, get_embedding, inbox, nearest, note_text, promote, set_embedding, write_note, InboxItem, NewNote,
+    NoteKind,
+};
 use zettelist::omnigraph::Omnigraph;
 
 fn note(body: &str, source: Option<&str>, locator: Option<&str>, created: DateTime<Local>) -> NewNote {
@@ -376,4 +379,88 @@ fn is_old_after_30_days() {
     };
     assert!(!item.is_old(created + chrono::Duration::days(30)));
     assert!(item.is_old(created + chrono::Duration::days(30) + chrono::Duration::seconds(1)));
+}
+
+fn permanent(og: &Omnigraph, from: &(NoteKind, String), title: &str, body: &str, t: DateTime<Local>) -> String {
+    promote(og, std::slice::from_ref(from), title, body, t).unwrap()
+}
+
+#[test]
+fn nearest_orders_by_similarity_and_skips_missing() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f = write_note(&og, &note("元", None, None, at(10, 0))).unwrap();
+    let from = (NoteKind::Fleeting, f.slug);
+    let a = permanent(&og, &from, "A", "a の本文", at(11, 0));
+    let b = permanent(&og, &from, "B", "b の本文", at(11, 1));
+    let _c = permanent(&og, &from, "C", "c の本文", at(11, 2)); // 埋め込みなし
+    set_embedding(&og, NoteKind::Permanent, &a, &unit(&[(0, 1.0)])).unwrap();
+    set_embedding(&og, NoteKind::Permanent, &b, &unit(&[(0, 1.0), (1, 1.0)])).unwrap();
+
+    let near = nearest(&og, "main", &[NoteKind::Permanent], &unit(&[(0, 1.0)]), 5, 0.0).unwrap();
+    let slugs: Vec<&str> = near.iter().map(|n| n.slug.as_str()).collect();
+    assert_eq!(slugs, [a.as_str(), b.as_str()]);
+    assert!((near[0].similarity - 1.0).abs() < 1e-4, "{}", near[0].similarity);
+    assert!(near[1].similarity < near[0].similarity);
+    assert_eq!(near[0].kind, NoteKind::Permanent);
+    assert_eq!(near[0].title.as_deref(), Some("A"));
+    assert_eq!(near[0].body, "a の本文");
+}
+
+#[test]
+fn nearest_merges_kinds_by_similarity_and_limits() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f = write_note(&og, &note("メモ", None, None, at(10, 0))).unwrap();
+    let l = write_note(&og, &note("引用", Some("978-4-480-06899-8"), None, at(10, 5))).unwrap();
+    set_embedding(&og, NoteKind::Fleeting, &f.slug, &unit(&[(0, 1.0), (1, 1.0)])).unwrap();
+    set_embedding(&og, NoteKind::Literature, &l.slug, &unit(&[(0, 1.0)])).unwrap();
+    let kinds = [NoteKind::Fleeting, NoteKind::Literature];
+    let near = nearest(&og, "main", &kinds, &unit(&[(0, 1.0)]), 5, 0.0).unwrap();
+    assert_eq!(near.iter().map(|n| n.kind).collect::<Vec<_>>(), [NoteKind::Literature, NoteKind::Fleeting]);
+    assert_eq!(near[1].title, None);
+    let one = nearest(&og, "main", &kinds, &unit(&[(0, 1.0)]), 1, 0.0).unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].kind, NoteKind::Literature);
+}
+
+#[test]
+fn nearest_drops_below_min_similarity() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f = write_note(&og, &note("元", None, None, at(10, 0))).unwrap();
+    let from = (NoteKind::Fleeting, f.slug);
+    let a = permanent(&og, &from, "A", "a", at(11, 0));
+    let b = permanent(&og, &from, "B", "b", at(11, 1));
+    set_embedding(&og, NoteKind::Permanent, &a, &unit(&[(0, 1.0)])).unwrap();
+    set_embedding(&og, NoteKind::Permanent, &b, &unit(&[(1, 1.0)])).unwrap(); // 直交 (similarity 0)
+    let near = nearest(&og, "main", &[NoteKind::Permanent], &unit(&[(0, 1.0)]), 5, 0.5).unwrap();
+    assert_eq!(near.len(), 1);
+    assert_eq!(near[0].slug, a);
+}
+
+#[test]
+fn get_embedding_roundtrip() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f = write_note(&og, &note("メモ", None, None, at(10, 0))).unwrap();
+    assert_eq!(get_embedding(&og, NoteKind::Fleeting, &f.slug).unwrap(), None);
+    assert_eq!(get_embedding(&og, NoteKind::Fleeting, "nothing").unwrap(), None);
+    let v = unit(&[(3, 1.0), (7, 2.0)]);
+    set_embedding(&og, NoteKind::Fleeting, &f.slug, &v).unwrap();
+    let got = get_embedding(&og, NoteKind::Fleeting, &f.slug).unwrap().unwrap();
+    assert_eq!(got.len(), 1024);
+    assert!(got.iter().zip(&v).all(|(x, y)| (x - y).abs() < 1e-6));
+}
+
+#[test]
+fn note_text_by_kind() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f = write_note(&og, &note("メモの本文", None, None, at(10, 0))).unwrap();
+    let from = (NoteKind::Fleeting, f.slug.clone());
+    let p = permanent(&og, &from, "題名", "本文", at(11, 0));
+    assert_eq!(note_text(&og, NoteKind::Fleeting, &f.slug).unwrap().as_deref(), Some("メモの本文"));
+    assert_eq!(note_text(&og, NoteKind::Permanent, &p).unwrap().as_deref(), Some("題名\n本文"));
+    assert_eq!(note_text(&og, NoteKind::Permanent, "nothing").unwrap(), None);
 }

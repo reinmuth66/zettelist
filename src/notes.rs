@@ -17,6 +17,7 @@ pub struct NewNote {
     pub created: chrono::DateTime<chrono::Local>,
 }
 
+use crate::embed::similarity;
 use crate::error::Error;
 use crate::omnigraph::Omnigraph;
 use crate::source_ref::SourceRef;
@@ -296,4 +297,108 @@ pub fn delete_notes(og: &Omnigraph, notes: &[(NoteKind, String)]) -> Result<(), 
         og.mutate(BRANCH, &q, json!({ "s": slug }))?;
     }
     Ok(())
+}
+
+/// 埋め込みを書き込む。ノートがなければ何も書かない。
+pub fn set_embedding(og: &Omnigraph, kind: NoteKind, slug: &str, v: &[f32]) -> Result<(), Error> {
+    let q = format!(
+        "query q($slug: String, $v: Vector(1024)) {{ update {} set {{ embedding: $v }} where slug = $slug }}",
+        kind.node_type()
+    );
+    og.mutate(BRANCH, &q, json!({ "slug": slug, "v": v }))
+}
+
+/// 埋め込みの元にする文。Permanent は題名と本文を改行でつなぎ、ほかは本文。ノートがなければ `None`。
+pub fn note_text(og: &Omnigraph, kind: NoteKind, slug: &str) -> Result<Option<String>, Error> {
+    let q = format!(
+        "query q($s: String) {{ match {{ $n: {t} {{ slug: $s }} }} return {{ $n.body as body{title} }} }}",
+        t = kind.node_type(),
+        title = if kind == NoteKind::Permanent { ", $n.title as title" } else { "" },
+    );
+    let rows = og.query(BRANCH, &q, json!({ "s": slug }))?;
+    Ok(rows.first().map(|r| {
+        let body = r.get("body").and_then(Value::as_str).unwrap_or_default();
+        match r.get("title").and_then(Value::as_str) {
+            Some(title) if kind == NoteKind::Permanent => format!("{title}\n{body}"),
+            _ => body.to_string(),
+        }
+    }))
+}
+
+/// ノートの埋め込み。ノートがない、または埋め込みがまだなら `None`。
+pub fn get_embedding(og: &Omnigraph, kind: NoteKind, slug: &str) -> Result<Option<Vec<f32>>, Error> {
+    let q = format!(
+        "query q($s: String) {{ match {{ $n: {} {{ slug: $s }} }} return {{ $n.embedding as embedding }} }}",
+        kind.node_type()
+    );
+    let rows = og.query(BRANCH, &q, json!({ "s": slug }))?;
+    let Some(value) = rows.first().and_then(|r| r.get("embedding")) else {
+        return Ok(None);
+    };
+    parse_vector(value).map(Some)
+}
+
+fn parse_vector(value: &Value) -> Result<Vec<f32>, Error> {
+    let bad = || Error::Permanent(format!("埋め込みを読めません: {value}"));
+    value
+        .as_array()
+        .ok_or_else(bad)?
+        .iter()
+        .map(|x| x.as_f64().map(|f| f as f32).ok_or_else(bad))
+        .collect()
+}
+
+/// 近いノート 1 件。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Near {
+    pub kind: NoteKind,
+    pub slug: String,
+    /// Permanent だけが持つ
+    pub title: Option<String>,
+    pub body: String,
+    pub similarity: f32,
+}
+
+/// 種類ごとに `nearest` で引き、近い順に並べ直して `limit` 件を返す。
+/// 類似度が `min_similarity` に満たないものと、埋め込みのないノートは出ない。
+pub fn nearest(
+    og: &Omnigraph,
+    branch: &str,
+    kinds: &[NoteKind],
+    v: &[f32],
+    limit: usize,
+    min_similarity: f32,
+) -> Result<Vec<Near>, Error> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    for &kind in kinds {
+        let title =if kind == NoteKind::Permanent { "$n.title as title, " } else { "" };
+        // nearest は末尾の limit が要る。種類ごとに limit 件まで引けば、合わせた上位 limit 件を必ず含む。
+        let q = format!(
+            "query q($v: Vector(1024)) {{ match {{ $n: {t} }} \
+             return {{ $n.slug as slug, {title}$n.body as body, nearest($n.embedding, $v) as distance }} \
+             order {{ nearest($n.embedding, $v) }} limit {limit} }}",
+            t = kind.node_type(),
+        );
+        for r in og.query(branch, &q, json!({ "v": v }))? {
+            let distance = r
+                .get("distance")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| Error::Permanent(format!("distance を読めません: {r:?}")))?;
+            let slug = text(&r, "slug").ok_or_else(|| Error::Permanent(format!("slug がありません: {r:?}")))?;
+            found.push(Near {
+                kind,
+                slug,
+                title: text(&r, "title"),
+                body: r.get("body").and_then(Value::as_str).unwrap_or_default().to_string(),
+                similarity: similarity(distance as f32),
+            });
+        }
+    }
+    found.retain(|n| n.similarity >= min_similarity);
+    found.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
+    found.truncate(limit);
+    Ok(found)
 }

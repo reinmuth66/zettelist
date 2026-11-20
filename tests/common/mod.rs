@@ -138,3 +138,26 @@ impl Drop for TestServer {
         let _ = self.child.wait();
     }
 }
+
+/// 決まった文に決まったベクトルを返す偽の埋め込み。知らない文は Permanent エラー。
+pub struct FixedEmbedder(pub std::collections::HashMap<String, Vec<f32>>);
+
+impl zettelist::embed::Embedder for FixedEmbedder {
+    fn embed(&self, text: &str) -> Result<Vec<f32>, zettelist::error::Error> {
+        self.0
+            .get(text)
+            .cloned()
+            .ok_or_else(|| zettelist::error::Error::Permanent(format!("FixedEmbedder が知らない文です: {text}")))
+    }
+}
+
+/// 1024 次元で、`(位置, 値)` の成分だけを持つ正規化したベクトル。
+pub fn unit(parts: &[(usize, f32)]) -> Vec<f32> {
+    let mut v = vec![0.0f32; 1024];
+    for (i, x) in parts {
+        v[*i] = *x;
+    }
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!(norm > 0.0, "ゼロベクトルは正規化できません");
+    v.iter().map(|x| x / norm).collect()
+}

@@ -9,7 +9,7 @@ pub mod source_ref;
 pub mod worker;
 
 use config::Config;
-use embed::{Embedder, UnimplementedEmbedder};
+use embed::{Embedder, OllamaEmbedder};
 use error::Error;
 use omnigraph::Omnigraph;
 use paths::Paths;
@@ -31,6 +31,7 @@ impl Ctx {
         let paths = Paths::from_env()?;
         let og = Omnigraph::new(&config.omnigraph, &paths.state)?;
         let queue = Queue::open(&paths.state)?;
-        Ok(Ctx { config, paths, og, embedder: Box::new(UnimplementedEmbedder), queue })
+        let embedder = Box::new(OllamaEmbedder::new(&config.embed));
+        Ok(Ctx { config, paths, og, embedder, queue })
     }
 }
