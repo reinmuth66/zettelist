@@ -156,3 +156,12 @@ fn reembed_queues_one_embed_per_note() {
     assert_eq!(items.len(), 1);
     assert!(items[0]["job"]["Embed"].is_object(), "{}", items[0]);
 }
+
+#[test]
+fn backup_without_repo_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl(dir.path()).arg("--backup").output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("backup.repo が設定されていません"), "stderr: {stderr}");
+}

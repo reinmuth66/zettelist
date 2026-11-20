@@ -1,6 +1,7 @@
 use chrono::Local;
 use clap::Parser;
 use std::process::ExitCode;
+use zettelist::backup::{self, Outcome};
 use zettelist::error::Error;
 use zettelist::notes::{write_note, NewNote};
 use zettelist::queue::Job;
@@ -34,12 +35,19 @@ struct Cli {
     /// すべてのノートの埋め込みを作り直す
     #[arg(long)]
     reembed: bool,
+
+    /// main を backup.repo に書き出して commit する
+    #[arg(long)]
+    backup: bool,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if cli.worker || cli.reembed {
         return finish(admin(&cli));
+    }
+    if cli.backup {
+        return backup_now();
     }
     let Some(body) = cli.body else {
         println!("TUI は計画 3 で作ります");
@@ -68,6 +76,29 @@ fn admin(cli: &Cli) -> Result<(), Error> {
     start_worker(&ctx);
     println!("{count} 件の埋め込みを積みました");
     Ok(())
+}
+
+/// `--backup`
+fn backup_now() -> ExitCode {
+    let result = Ctx::from_env().and_then(|ctx| backup::run(&ctx, "backup"));
+    match result {
+        Ok(Outcome::Committed) => {
+            println!("バックアップしました");
+            ExitCode::SUCCESS
+        }
+        Ok(Outcome::NoChanges) => {
+            println!("変更はありません");
+            ExitCode::SUCCESS
+        }
+        Ok(Outcome::NotConfigured) => {
+            eprintln!("backup.repo が設定されていません");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run(note: NewNote) -> Result<(), Error> {

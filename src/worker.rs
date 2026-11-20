@@ -1,5 +1,6 @@
 //! 待ち行列を処理する worker。
 
+use crate::backup;
 use crate::error::Error;
 use crate::notes::{note_text, set_embedding, write_note, NoteKind};
 use crate::paths::Paths;
@@ -37,8 +38,8 @@ pub fn execute(ctx: &Ctx, job: &Job) -> Result<(), Error> {
             let _lock = lock_review(&ctx.paths.review_lock())?;
             propose_for(&ctx.og, ctx.embedder.as_ref(), &ctx.config.link, slug).map(|_| ())
         }
-        // Task 11 で backup::run に差し替える
-        Job::Backup { .. } => Ok(()),
+        // backup.repo が未設定の人には何も起きない
+        Job::Backup { message } => backup::run(ctx, message).map(|_| ()),
     }
 }
 
