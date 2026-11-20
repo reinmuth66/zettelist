@@ -379,7 +379,7 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 - Rust + ratatui。1 つのバイナリで TUI、書き込み、worker を受け持つ
 - Omnigraph には `omnigraph-server` の HTTP でつなぐ。HTTP の呼び出しは 1 か所にまとめ、後で SDK などに差し替えられるようにする
 - LLM は使わない。Ollama は埋め込みのためだけに使い、zl (書き込み) と omnigraph-server (テキストでの検索) から呼ばれる
-- Omnigraph には CLI (`omnigraph --target <server target>`) をサブプロセスで呼ぶ。確認で全操作ができたのは CLI だけで、HTTP を直接呼ぶ形は試していない。呼び出しは 1 か所にまとめ、後で HTTP や SDK に差し替えられるようにする
+- Omnigraph には CLI (`omnigraph --target <server target>`) をサブプロセスで呼ぶ。確認で全操作ができたのは CLI だけで、HTTP を直接呼ぶ形は試していない。呼び出しは 1 か所にまとめ、後で HTTP や SDK に差し替えられるようにする。Rust のクレート (`omnigraph-engine`、`omnigraph-api-types` など) は crates.io に出ているが、2026-11-20 の時点で 0.8.0 で、使っている CLI (0.15.0、HTTP contract 0.14) より古い。当面は CLI のままにする
 - omnigraph-server は cluster 設定からしか起動できない。cluster.yaml (グラフ、スキーマ、埋め込みプロバイダ) を置き、`cluster apply` でグラフを作り、apply のロックを外してから `omnigraph-server --cluster file://<data> --bind 127.0.0.1:8080 --unauthenticated` で起動する。手順は確認の記録にある。cluster.yaml とスキーマはデータ用リポジトリに置く (builder が場所を決める)
 - スキーマの変更は、生きているブランチが main だけのときにしかできない。zl のスキーマを変えるときは review ブランチをいったん消す
 - 開発環境とビルドは nix flake。`devShells` に Rust のツールチェーン、`omnigraph` / `omnigraph-server`、`ollama` を入れる。`packages` でバイナリを出し、dotfiles から入れる
