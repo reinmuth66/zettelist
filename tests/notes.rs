@@ -340,13 +340,35 @@ fn promoted_notes_leave_inbox() {
 fn promote_advances_slug_on_permanent_collision() {
     let s = TestServer::start();
     let og = s.og();
-    let f = write_note(&og, &note("メモ", None, None, at(10, 0))).unwrap();
-    let from = [(NoteKind::Fleeting, f.slug)];
-    let a = promote(&og, &from, "一つ目", "本文一", at(11, 0)).unwrap();
-    let b = promote(&og, &from, "二つ目", "本文二", at(11, 0)).unwrap();
+    let f1 = write_note(&og, &note("メモ一", None, None, at(10, 0))).unwrap();
+    let f2 = write_note(&og, &note("メモ二", None, None, at(10, 1))).unwrap();
+    let a = promote(&og, &[(NoteKind::Fleeting, f1.slug)], "一つ目", "本文一", at(11, 0)).unwrap();
+    let b = promote(&og, &[(NoteKind::Fleeting, f2.slug)], "二つ目", "本文二", at(11, 0)).unwrap();
     assert_eq!(a, "20261120110000");
     assert_eq!(b, "20261120110001");
     assert_eq!(permanents(&og).len(), 2);
+}
+
+#[test]
+fn promote_rejects_already_promoted_notes() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f = write_note(&og, &note("メモ", None, None, at(10, 0))).unwrap();
+    let l = write_note(&og, &note("引用", Some("978-4-480-06899-8"), Some("p.1"), at(10, 5))).unwrap();
+    let fresh = write_note(&og, &note("まだ", None, None, at(10, 10))).unwrap();
+    let from = [(NoteKind::Fleeting, f.slug.clone()), (NoteKind::Literature, l.slug.clone())];
+    promote(&og, &from, "題", "本文", at(11, 0)).unwrap();
+    // 片方だけでも昇格済みなら、どちらも昇格しない
+    for again in [
+        vec![(NoteKind::Fleeting, f.slug.clone())],
+        vec![(NoteKind::Literature, l.slug.clone())],
+        vec![(NoteKind::Fleeting, fresh.slug.clone()), (NoteKind::Fleeting, f.slug.clone())],
+    ] {
+        let e = promote(&og, &again, "題2", "本文2", at(12, 0)).unwrap_err();
+        assert!(matches!(&e, Error::Invalid(m) if m.contains("昇格済み")), "{e:?}");
+    }
+    assert_eq!(count(&og, "Permanent"), 1);
+    assert_eq!(inbox(&og).unwrap().len(), 1);
 }
 
 #[test]
@@ -418,15 +440,19 @@ fn permanent(og: &Omnigraph, from: &(NoteKind, String), title: &str, body: &str,
     promote(og, std::slice::from_ref(from), title, body, t).unwrap()
 }
 
+/// まだ昇格していない Fleeting を 1 件書いて、昇格元の組で返す。
+fn fresh_source(og: &Omnigraph, n: u32) -> (NoteKind, String) {
+    let f = write_note(og, &note(&format!("元{n}"), None, None, at(10, n))).unwrap();
+    (NoteKind::Fleeting, f.slug)
+}
+
 #[test]
 fn nearest_orders_by_similarity_and_skips_missing() {
     let s = TestServer::start();
     let og = s.og();
-    let f = write_note(&og, &note("元", None, None, at(10, 0))).unwrap();
-    let from = (NoteKind::Fleeting, f.slug);
-    let a = permanent(&og, &from, "A", "a の本文", at(11, 0));
-    let b = permanent(&og, &from, "B", "b の本文", at(11, 1));
-    let _c = permanent(&og, &from, "C", "c の本文", at(11, 2)); // 埋め込みなし
+    let a = permanent(&og, &fresh_source(&og, 0), "A", "a の本文", at(11, 0));
+    let b = permanent(&og, &fresh_source(&og, 1), "B", "b の本文", at(11, 1));
+    let _c = permanent(&og, &fresh_source(&og, 2), "C", "c の本文", at(11, 2)); // 埋め込みなし
     set_embedding(&og, NoteKind::Permanent, &a, &unit(&[(0, 1.0)])).unwrap();
     set_embedding(&og, NoteKind::Permanent, &b, &unit(&[(0, 1.0), (1, 1.0)])).unwrap();
 
@@ -461,10 +487,8 @@ fn nearest_merges_kinds_by_similarity_and_limits() {
 fn nearest_drops_below_min_similarity() {
     let s = TestServer::start();
     let og = s.og();
-    let f = write_note(&og, &note("元", None, None, at(10, 0))).unwrap();
-    let from = (NoteKind::Fleeting, f.slug);
-    let a = permanent(&og, &from, "A", "a", at(11, 0));
-    let b = permanent(&og, &from, "B", "b", at(11, 1));
+    let a = permanent(&og, &fresh_source(&og, 0), "A", "a", at(11, 0));
+    let b = permanent(&og, &fresh_source(&og, 1), "B", "b", at(11, 1));
     set_embedding(&og, NoteKind::Permanent, &a, &unit(&[(0, 1.0)])).unwrap();
     set_embedding(&og, NoteKind::Permanent, &b, &unit(&[(1, 1.0)])).unwrap(); // 直交 (similarity 0)
     let near = nearest(&og, "main", &[NoteKind::Permanent], &unit(&[(0, 1.0)]), 5, 0.5).unwrap();

@@ -283,10 +283,11 @@ fn similar_lists_near_inbox_and_permanent() {
     let near = write_note(&og, &new_note("近いメモ", None, now - Duration::hours(3))).unwrap();
     let far = write_note(&og, &new_note("遠いメモ", None, now - Duration::hours(2))).unwrap();
     let src = write_note(&og, &new_note("元", None, now - Duration::hours(1))).unwrap();
+    let src2 = write_note(&og, &new_note("元二", None, now - Duration::minutes(30))).unwrap();
     let perm_near =
         promote(&og, &[(NoteKind::Fleeting, src.slug.clone())], "近い永久", "近い永久の本文", now).unwrap();
     let perm_far =
-        promote(&og, &[(NoteKind::Fleeting, src.slug.clone())], "遠い永久", "遠い永久の本文", now + Duration::hours(1))
+        promote(&og, &[(NoteKind::Fleeting, src2.slug.clone())], "遠い永久", "遠い永久の本文", now + Duration::hours(1))
             .unwrap();
     let x = unit(&[(0, 1.0)]);
     let close = unit(&[(0, 1.0), (1, 0.2)]);
@@ -355,9 +356,9 @@ fn similar_permanent_excludes_self_and_caps_at_three() {
     let server = TestServer::start();
     let og = server.og();
     let now = Local::now();
-    let src = write_note(&og, &new_note("元", None, now - Duration::hours(10))).unwrap();
     let mut perms = Vec::new();
     for i in 0..5 {
+        let src = write_note(&og, &new_note(&format!("元{i}"), None, now - Duration::hours(10 - i))).unwrap();
         let p = promote(
             &og,
             &[(NoteKind::Fleeting, src.slug.clone())],
@@ -575,4 +576,26 @@ fn delete_conflicts_with_other_actions() {
         let output = zl(dir.path()).args(&args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
     }
+}
+
+#[test]
+fn promote_already_promoted_is_invalid() {
+    let server = TestServer::start();
+    let og = server.og();
+    let a = write_note(&og, &new_note("元", None, Local::now())).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let args = ["--promote", a.slug.as_str(), "--title", "T", "--body", "B", "--json"];
+    json_out(&zl_on(&server, dir.path(), 0.0).args(args).output().unwrap());
+    assert_eq!(pending(dir.path()).len(), 1);
+    let output = zl_on(&server, dir.path(), 0.0).args(args).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+    assert_eq!(err["kind"], "invalid");
+    assert!(err["error"].as_str().unwrap().contains("昇格済み"), "{err}");
+    let count = og
+        .query("main", "query q() { match { $n: Permanent } return { $n.slug as slug } }", serde_json::json!({}))
+        .unwrap()
+        .len();
+    assert_eq!(count, 1);
+    assert_eq!(pending(dir.path()).len(), 1);
 }

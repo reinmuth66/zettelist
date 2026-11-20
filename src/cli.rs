@@ -349,7 +349,12 @@ fn promote_notes(json: bool, slugs: &str, title: &str, body: BodySource) -> Resu
     let slug = crate::notes::promote(&ctx.og, &from, title, &body, Local::now())?;
     // 昇格は済んでいるので、後処理の失敗では終了コードを変えない
     if let Err(e) = ctx.queue.push(Job::Promote { slug: slug.clone() }) {
-        eprintln!("昇格の後処理の登録に失敗しました: {e}");
+        let message = format!("昇格しましたが、リンク提案を待ち行列に積めませんでした: {e}");
+        if json {
+            eprintln!("{}", json!({"warning": message, "slug": slug}));
+        } else {
+            eprintln!("{message}");
+        }
     }
     start_worker(&ctx);
     output(json, json!({"slug": slug}), &format!("昇格しました {slug}"));

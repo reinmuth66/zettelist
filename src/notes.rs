@@ -256,6 +256,7 @@ pub fn inbox(og: &Omnigraph) -> Result<Vec<InboxItem>, Error> {
 /// 呼ぶ側は、成功後に `Job::Promote { slug }` を待ち行列に積み、`worker::spawn_worker` を呼ぶこと
 /// (この関数は積みも worker の起動もしない)。
 /// slug の探索から load までは `write.lock` を持つ (`write_note` と同じ)。
+/// 昇格済みのノートが `from` にあると `Invalid` (同じ元から Permanent が重複しないように)。
 pub fn promote(
     og: &Omnigraph,
     from: &[(NoteKind, String)],
@@ -279,6 +280,19 @@ pub fn promote(
 
     // `write_note` と同じロックを、空き slug の探索から load まで持つ
     let _lock = lock_file(&og.write_lock())?;
+    // 昇格済みのノートをもう一度昇格すると、同じ元から Permanent が重複する (同時の昇格もここで止まる)
+    for (kind, from_slug) in from {
+        let (node, edge) = match kind {
+            NoteKind::Literature => ("Literature", "derivedFromLit"),
+            _ => ("Fleeting", "derivedFrom"),
+        };
+        let q = format!(
+            "query q($s: String) {{ match {{ $n: {node} {{ slug: $s }} $p: Permanent $p {edge} $n }} return {{ $p.slug as p }} }}"
+        );
+        if !og.query(BRANCH, &q, json!({ "s": from_slug }))?.is_empty() {
+            return Err(Error::Invalid(format!("ノート '{from_slug}' は昇格済みです")));
+        }
+    }
     let mut t = created.naive_local();
     let slug = loop {
         let slug = note_slug(t);
