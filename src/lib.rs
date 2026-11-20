@@ -6,6 +6,7 @@ pub mod omnigraph;
 pub mod paths;
 pub mod propose;
 pub mod queue;
+pub mod review;
 pub mod source_ref;
 pub mod worker;
 

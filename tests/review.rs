@@ -1,0 +1,335 @@
+mod common;
+
+use chrono::{DateTime, Local, TimeZone};
+use common::TestServer;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime};
+use zettelist::notes::{promote, write_note, NewNote, NoteKind};
+use zettelist::omnigraph::Omnigraph;
+use zettelist::propose::ensure_review;
+use zettelist::queue::{Job, Queue};
+use zettelist::review::{apply, list_proposals, Decision, Proposal, ReviewState, Summary};
+
+fn at(h: u32, m: u32) -> DateTime<Local> {
+    Local.with_ymd_and_hms(2026, 11, 20, h, m, 0).unwrap()
+}
+
+/// 昇格元の Fleeting を 1 件書いて Permanent を作る (埋め込みは付けない)。
+fn permanent(og: &Omnigraph, title: &str, minute: u32) -> String {
+    let f = write_note(
+        og,
+        &NewNote { body: format!("{title} の元"), source: None, locator: None, created: at(9, minute) },
+    )
+    .unwrap();
+    promote(og, &[(NoteKind::Fleeting, f.slug)], title, &format!("{title} の本文"), at(11, minute)).unwrap()
+}
+
+/// review に Links の提案を書く。
+fn propose_link(og: &Omnigraph, from: &str, to: &str, similarity: f32) -> Proposal {
+    ensure_review(og).unwrap();
+    og.load("review", &[json!({"edge":"Links","from":from,"to":to,"data":{"similarity":similarity}})]).unwrap();
+    Proposal::Link { from: from.to_string(), to: to.to_string(), similarity }
+}
+
+fn propose_hub(og: &Omnigraph, hub: &str, note: &str) -> Proposal {
+    ensure_review(og).unwrap();
+    og.load("review", &[json!({"edge":"Includes","from":hub,"to":note})]).unwrap();
+    Proposal::Hub { hub: hub.to_string(), note: note.to_string() }
+}
+
+/// ブランチの Links を (from, to, reason) で返す。
+fn links(og: &Omnigraph, branch: &str) -> Vec<(String, String, Option<String>)> {
+    let rows = og
+        .query(
+            branch,
+            "query q() { match { $a: Permanent $a $l:links $b } \
+             return { $a.slug as src, $b.slug as dst, $l.reason as reason } }",
+            json!({}),
+        )
+        .unwrap();
+    let mut v: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r["src"].as_str().unwrap().to_string(),
+                r["dst"].as_str().unwrap().to_string(),
+                r.get("reason").and_then(|x| x.as_str()).map(String::from),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+fn includes(og: &Omnigraph, branch: &str) -> Vec<(String, String)> {
+    let rows = og
+        .query(
+            branch,
+            "query q() { match { $h: Hub $h includes $p } return { $h.slug as hub, $p.slug as perm } }",
+            json!({}),
+        )
+        .unwrap();
+    rows.iter().map(|r| (r["hub"].as_str().unwrap().to_string(), r["perm"].as_str().unwrap().to_string())).collect()
+}
+
+fn adopt() -> Decision {
+    Decision::Adopt { reason: None }
+}
+
+fn state_path(s: &TestServer) -> std::path::PathBuf {
+    s.state_dir().join("review.json")
+}
+
+fn save_decisions(path: &std::path::Path, decisions: Vec<(&Proposal, Decision)>) {
+    let mut st = ReviewState::load(path).unwrap();
+    for (p, d) in decisions {
+        st.decisions.insert(p.key(), d);
+    }
+    st.save(path).unwrap();
+}
+
+#[test]
+fn lists_only_proposals_not_in_main() {
+    let s = TestServer::start();
+    let og = s.og();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let c = permanent(&og, "C", 2);
+    og.load("main", &[json!({"edge":"Links","from":a,"to":b,"data":{"similarity":0.9}})]).unwrap();
+    ensure_review(&og).unwrap();
+    propose_link(&og, &a, &c, 0.6);
+    let near = propose_link(&og, &b, &c, 0.8);
+
+    let got = list_proposals(&og).unwrap();
+    assert_eq!(got.len(), 2, "{got:?}");
+    // 近い順
+    assert_eq!(got[0].key(), near.key());
+    assert_eq!(got[1].key(), format!("link:{a}:{c}"));
+}
+
+#[test]
+fn links_come_before_hubs_in_list() {
+    let s = TestServer::start();
+    let og = s.og();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    og.load("main", &[json!({"type":"Hub","data":{"slug":"hub-x","title":"ハブ X"}})]).unwrap();
+    propose_hub(&og, "hub-x", &a);
+    propose_link(&og, &a, &b, 0.7);
+
+    let got = list_proposals(&og).unwrap();
+    assert_eq!(got.len(), 2);
+    assert!(matches!(got[0], Proposal::Link { .. }), "{got:?}");
+    assert_eq!(got[1], Proposal::Hub { hub: "hub-x".into(), note: a.clone() });
+    assert_eq!(got[1].key(), format!("hub:hub-x:{a}"));
+}
+
+#[test]
+fn apply_merges_adopted_and_drops_rejected() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let c = permanent(&og, "C", 2);
+    let p1 = propose_link(&og, &a, &b, 0.9);
+    let p2 = propose_link(&og, &a, &c, 0.8);
+    save_decisions(&state_path(&s), vec![(&p1, adopt()), (&p2, Decision::Reject)]);
+
+    let summary = apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(summary, Summary { links: 1, hubs: 0 });
+    assert_eq!(links(&og, "main"), [(a.clone(), b.clone(), None)]);
+    assert!(list_proposals(&og).unwrap().is_empty());
+    // 判断は片付く
+    assert_eq!(ReviewState::load(&state_path(&s)).unwrap(), ReviewState::default());
+}
+
+#[test]
+fn adopt_with_reason_sets_reason_in_main() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let p = propose_link(&og, &a, &b, 0.9);
+    save_decisions(&state_path(&s), vec![(&p, Decision::Adopt { reason: Some("粒度の話".into()) })]);
+
+    apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(links(&og, "main"), [(a.clone(), b.clone(), Some("粒度の話".to_string()))]);
+    // 類似度は元のまま
+    let rows = og
+        .query("main", "query q() { match { $a: Permanent $a $l:links $b } return { $l.similarity as sim } }", json!({}))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!((rows[0]["sim"].as_f64().unwrap() - 0.9).abs() < 1e-3);
+}
+
+#[test]
+fn undecided_stays_in_review() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let c = permanent(&og, "C", 2);
+    let d = permanent(&og, "D", 3);
+    let p1 = propose_link(&og, &a, &b, 0.9);
+    let p2 = propose_link(&og, &a, &c, 0.8);
+    let p3 = propose_link(&og, &a, &d, 0.7);
+    save_decisions(&state_path(&s), vec![(&p1, adopt())]);
+
+    apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(links(&og, "main"), [(a.clone(), b.clone(), None)]);
+    let left: Vec<String> = list_proposals(&og).unwrap().iter().map(Proposal::key).collect();
+    assert_eq!(left, [p2.key(), p3.key()]);
+}
+
+#[test]
+fn apply_twice_in_a_row_works() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let p1 = propose_link(&og, &a, &b, 0.9);
+    save_decisions(&state_path(&s), vec![(&p1, adopt())]);
+    apply(&og, &state_path(&s), &queue).unwrap();
+
+    // main が進み、新しい提案が来る
+    let c = permanent(&og, "C", 2);
+    let p2 = propose_link(&og, &a, &c, 0.8);
+    save_decisions(&state_path(&s), vec![(&p2, adopt())]);
+    let summary = apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(summary.links, 1);
+    assert_eq!(links(&og, "main"), [(a.clone(), b.clone(), None), (a.clone(), c.clone(), None)]);
+    assert!(list_proposals(&og).unwrap().is_empty());
+}
+
+#[test]
+fn rerun_after_crash_keeps_undecided() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let c = permanent(&og, "C", 2);
+    let d = permanent(&og, "D", 3);
+    let p1 = propose_link(&og, &a, &b, 0.9);
+    let p2 = propose_link(&og, &a, &c, 0.8);
+    let p3 = propose_link(&og, &a, &d, 0.7);
+
+    // 手順 3 のあとで止まった状態: 未判断の 2 本は review から消え、reinsert にだけ残る
+    let path = state_path(&s);
+    let mut st = ReviewState::load(&path).unwrap();
+    st.decisions.insert(p1.key(), adopt());
+    st.reinsert = vec![p2.clone(), p3.clone()];
+    st.save(&path).unwrap();
+    for (x, y) in [(&a, &c), (&a, &d)] {
+        og.mutate(
+            "review",
+            "query d($a: String, $b: String) { delete Links where @src = $a and @dst = $b }",
+            json!({"a": x, "b": y}),
+        )
+        .unwrap();
+    }
+    assert_eq!(list_proposals(&og).unwrap().len(), 1);
+
+    apply(&og, &path, &queue).unwrap();
+    assert_eq!(links(&og, "main"), [(a.clone(), b.clone(), None)]);
+    let left: Vec<String> = list_proposals(&og).unwrap().iter().map(Proposal::key).collect();
+    assert_eq!(left, [p2.key(), p3.key()]);
+    assert_eq!(ReviewState::load(&path).unwrap(), ReviewState::default());
+}
+
+#[test]
+fn rerun_after_merge_still_restores_undecided() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let c = permanent(&og, "C", 2);
+    let p1 = propose_link(&og, &a, &b, 0.9);
+    let p2 = propose_link(&og, &a, &c, 0.8);
+
+    // 手順 5 (merge) のあとで止まった状態
+    let path = state_path(&s);
+    let mut st = ReviewState::load(&path).unwrap();
+    st.decisions.insert(p1.key(), Decision::Adopt { reason: Some("理由".into()) });
+    st.reinsert = vec![p2.clone()];
+    st.save(&path).unwrap();
+    og.mutate(
+        "review",
+        "query d($a: String, $b: String) { delete Links where @src = $a and @dst = $b }",
+        json!({"a": a, "b": c}),
+    )
+    .unwrap();
+    og.statement("branch merge review into main").unwrap();
+
+    let summary = apply(&og, &path, &queue).unwrap();
+    assert_eq!(summary.links, 1);
+    assert_eq!(links(&og, "main"), [(a.clone(), b.clone(), None)]);
+    let left: Vec<String> = list_proposals(&og).unwrap().iter().map(Proposal::key).collect();
+    assert_eq!(left, [p2.key()]);
+}
+
+#[test]
+fn hub_proposal_is_adopted_and_counted() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    og.load("main", &[json!({"type":"Hub","data":{"slug":"hub-x","title":"ハブ X"}})]).unwrap();
+    let h = propose_hub(&og, "hub-x", &a);
+    let l = propose_link(&og, &a, &b, 0.9);
+    save_decisions(&state_path(&s), vec![(&h, adopt()), (&l, adopt())]);
+
+    let summary = apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(summary.message(), "merge: links 1, hub 1");
+    assert_eq!(includes(&og, "main"), [("hub-x".to_string(), a.clone())]);
+    assert!(list_proposals(&og).unwrap().is_empty());
+}
+
+#[test]
+fn summary_message_skips_zero() {
+    assert_eq!(Summary { links: 3, hubs: 0 }.message(), "merge: links 3");
+    assert_eq!(Summary { links: 3, hubs: 1 }.message(), "merge: links 3, hub 1");
+    assert_eq!(Summary { links: 0, hubs: 0 }.message(), "merge");
+}
+
+#[test]
+fn state_file_is_human_readable_and_missing_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("review.json");
+    assert_eq!(ReviewState::load(&path).unwrap(), ReviewState::default());
+    let st = ReviewState {
+        decisions: BTreeMap::from([
+            ("link:a:b".to_string(), Decision::Adopt { reason: Some("粒度の話".into()) }),
+            ("hub:h:a".to_string(), Decision::Reject),
+        ]),
+        reinsert: vec![Proposal::Link { from: "a".into(), to: "c".into(), similarity: 0.5 }],
+    };
+    st.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("粒度の話"), "{text}");
+    assert_eq!(ReviewState::load(&path).unwrap(), st);
+    // 一時ファイルを残さない
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn apply_queues_backup() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let p = propose_link(&og, &a, &b, 0.9);
+    save_decisions(&state_path(&s), vec![(&p, adopt())]);
+
+    apply(&og, &state_path(&s), &queue).unwrap();
+    let e = queue.next_ready(SystemTime::now() + Duration::from_secs(1)).unwrap().unwrap();
+    assert_eq!(e.job, Job::Backup { message: "merge: links 1".to_string() });
+}

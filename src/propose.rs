@@ -8,8 +8,8 @@ use crate::omnigraph::Omnigraph;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-const MAIN: &str = "main";
-const REVIEW: &str = "review";
+pub(crate) const MAIN: &str = "main";
+pub(crate) const REVIEW: &str = "review";
 
 /// 1 回の提案の結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
