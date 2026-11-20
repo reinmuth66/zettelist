@@ -21,7 +21,7 @@ use std::process::ExitCode;
 #[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "review"]).multiple(false))]
 struct Cli {
     /// 出典 (ISBN、DOI、arXiv ID、URL、または登録済みのスラッグ)
-    #[arg(short = 's', long = "source", value_name = "出典")]
+    #[arg(short = 's', long = "source", value_name = "出典", conflicts_with = "action")]
     source: Option<String>,
 
     /// 出典の中の位置 (ページなど)

@@ -105,3 +105,39 @@ fn version_with_json_is_still_plain() {
     assert!(output.status.success());
     assert!(String::from_utf8(output.stdout).unwrap().starts_with("zettelist "));
 }
+
+#[test]
+fn source_with_action_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [vec!["--inbox", "-s", "foo"], vec!["--backup", "-s", "x", "-p", "3"], vec!["--worker", "-s", "x"]] {
+        let output = zl(dir.path()).args(&args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[test]
+fn json_source_with_action_is_json_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl(dir.path()).args(["--json", "--inbox", "-s", "foo"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+    assert_eq!(err["kind"], "invalid");
+}
+
+#[test]
+fn json_before_double_dash_makes_usage_error_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl(dir.path()).args(["--json", "-p", "x", "--", "body"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+    assert_eq!(err["kind"], "invalid");
+}
+
+#[test]
+fn json_only_after_double_dash_keeps_clap_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl(dir.path()).args(["-p", "x", "--", "body", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(serde_json::from_str::<serde_json::Value>(&stderr).is_err(), "stderr: {stderr}");
+}
