@@ -1,5 +1,6 @@
 //! ファイルで持つ待ち行列。1 件 1 ファイル (`queue/pending/<id>.json`、`queue/failed/<id>.json`)。
-//! id は `<UNIX 時刻のナノ秒 20 桁>-<pid>-<連番>` で、名前の順が積んだ順になる。
+//! id は `<UNIX 時刻のナノ秒 20 桁>-<pid>` で、名前の順が積んだ順になる。
+//! 読めないファイルは `queue/corrupt/` に移して、残りの処理を続ける。
 
 use crate::error::Error;
 use crate::notes::{NewNote, NoteKind};
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -30,10 +31,11 @@ pub struct Entry {
 pub struct Queue {
     pending: PathBuf,
     failed: PathBuf,
+    corrupt: PathBuf,
 }
 
-/// 同じプロセスの中で、同じナノ秒に積んでも id が増え続けるようにする連番
-static COUNTER: AtomicU64 = AtomicU64::new(0);
+/// このプロセスで最後に使った id のナノ秒。同じナノ秒でも時計が戻っても id が増え続けるようにする
+static LAST_NANOS: Mutex<u128> = Mutex::new(0);
 
 /// 失敗 `attempts` 回目のあとの待ち時間。使い切ったら `None` (failed へ回す)。
 pub fn backoff(attempts: u32) -> Option<Duration> {
@@ -49,10 +51,17 @@ fn io_err(what: &str, path: &Path, e: std::io::Error) -> Error {
     Error::Permanent(format!("{what}に失敗しました ({}): {e}", path.display()))
 }
 
+/// 時計が止まっても戻っても、前に使った値より必ず大きくする
+fn next_nanos(now: u128, last: u128) -> u128 {
+    now.max(last + 1)
+}
+
 fn new_id() -> String {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let seq = COUNTER.fetch_add(1, Ordering::SeqCst);
-    format!("{nanos:020}-{}-{seq:010}", std::process::id())
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let mut last = LAST_NANOS.lock().unwrap_or_else(|p| p.into_inner());
+    let nanos = next_nanos(now, *last);
+    *last = nanos;
+    format!("{nanos:020}-{}", std::process::id())
 }
 
 fn entry_path(dir: &Path, id: &str) -> PathBuf {
@@ -71,10 +80,26 @@ fn write_entry(dir: &Path, entry: &Entry) -> Result<(), Error> {
     Ok(())
 }
 
-fn read_entry(path: &Path) -> Result<Entry, Error> {
-    let bytes = fs::read(path).map_err(|e| io_err("読み込み", path, e))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| Error::Permanent(format!("待ち行列のファイルが壊れています ({}): {e}", path.display())))
+/// 項目を読む。読む前に消えていたら `None` (別のプロセスが完了させた)。
+/// JSON として読めない、または知らない Job の種類なら `corrupt` へ移して `None`。
+fn read_entry(path: &Path, corrupt: &Path) -> Result<Option<Entry>, Error> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_err("読み込み", path, e)),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(entry) => Ok(Some(entry)),
+        Err(_) => {
+            let name = path.file_name().unwrap_or_default();
+            match fs::rename(path, corrupt.join(name)) {
+                Ok(()) => Ok(None),
+                // 移す前に別のプロセスが片付けた
+                Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(io_err("壊れたファイルの退避", path, e)),
+            }
+        }
+    }
 }
 
 /// 存在しなくてもよいファイルの削除
@@ -87,7 +112,8 @@ fn remove_file(path: &Path) -> Result<(), Error> {
 }
 
 /// ディレクトリの中の項目を id の順 (積んだ順) で返す。一時ファイルなど `.json` 以外は無視する。
-fn list(dir: &Path) -> Result<Vec<Entry>, Error> {
+/// 消えたファイルは飛ばし、壊れたファイルは `corrupt` へ移す。
+fn list(dir: &Path, corrupt: &Path) -> Result<Vec<Entry>, Error> {
     let mut paths = Vec::new();
     for item in fs::read_dir(dir).map_err(|e| io_err("ディレクトリの読み込み", dir, e))? {
         let path = item.map_err(|e| io_err("ディレクトリの読み込み", dir, e))?.path();
@@ -96,17 +122,24 @@ fn list(dir: &Path) -> Result<Vec<Entry>, Error> {
         }
     }
     paths.sort();
-    paths.iter().map(|p| read_entry(p)).collect()
+    let mut entries = Vec::new();
+    for path in &paths {
+        if let Some(entry) = read_entry(path, corrupt)? {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
 }
 
 impl Queue {
     pub fn open(state_dir: &Path) -> Result<Queue, Error> {
         let pending = state_dir.join("queue/pending");
         let failed = state_dir.join("queue/failed");
-        for dir in [&pending, &failed] {
+        let corrupt = state_dir.join("queue/corrupt");
+        for dir in [&pending, &failed, &corrupt] {
             fs::create_dir_all(dir).map_err(|e| io_err("ディレクトリの作成", dir, e))?;
         }
-        Ok(Queue { pending, failed })
+        Ok(Queue { pending, failed, corrupt })
     }
 
     pub fn push(&self, job: Job) -> Result<String, Error> {
@@ -118,12 +151,12 @@ impl Queue {
 
     /// 積んだ順で、`not_before <= now` の最初の 1 件
     pub fn next_ready(&self, now: SystemTime) -> Result<Option<Entry>, Error> {
-        Ok(list(&self.pending)?.into_iter().find(|e| e.not_before <= now))
+        Ok(list(&self.pending, &self.corrupt)?.into_iter().find(|e| e.not_before <= now))
     }
 
     /// pending の最小の `not_before`
     pub fn earliest_wait(&self) -> Result<Option<SystemTime>, Error> {
-        Ok(list(&self.pending)?.into_iter().map(|e| e.not_before).min())
+        Ok(list(&self.pending, &self.corrupt)?.into_iter().map(|e| e.not_before).min())
     }
 
     pub fn complete(&self, id: &str) -> Result<(), Error> {
@@ -151,15 +184,14 @@ impl Queue {
     }
 
     pub fn failed(&self) -> Result<Vec<Entry>, Error> {
-        list(&self.failed)
+        list(&self.failed, &self.corrupt)
     }
 
     pub fn retry_failed(&self, id: &str) -> Result<(), Error> {
-        let path = entry_path(&self.failed, id);
-        if !path.exists() {
-            return Err(Error::Permanent(format!("失敗の中に {id} はありません")));
+        match read_entry(&entry_path(&self.failed, id), &self.corrupt)? {
+            Some(entry) => self.requeue(entry),
+            None => Err(Error::Permanent(format!("失敗の中に {id} はありません"))),
         }
-        self.requeue(read_entry(&path)?)
     }
 
     pub fn retry_all_failed(&self) -> Result<(), Error> {
@@ -171,10 +203,13 @@ impl Queue {
 
     pub fn discard_failed(&self, id: &str) -> Result<(), Error> {
         let path = entry_path(&self.failed, id);
-        if !path.exists() {
-            return Err(Error::Permanent(format!("失敗の中に {id} はありません")));
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                Err(Error::Permanent(format!("失敗の中に {id} はありません")))
+            }
+            Err(e) => Err(io_err("削除", &path, e)),
         }
-        remove_file(&path)
     }
 
     /// failed から pending へ `attempts = 0` で戻す
@@ -298,5 +333,67 @@ mod tests {
         q.discard_failed(&e.id).unwrap();
         assert!(q.failed().unwrap().is_empty());
         assert!(q.next_ready(SystemTime::now() + Duration::from_secs(1)).unwrap().is_none());
+    }
+
+    #[test]
+    fn next_nanos_is_strictly_increasing_even_if_clock_goes_back() {
+        // 時計が進んでいれば now をそのまま使う
+        assert_eq!(next_nanos(100, 50), 100);
+        // 同じ値なら 1 進める
+        assert_eq!(next_nanos(100, 100), 101);
+        // 時計が戻っても last より後ろになる
+        assert_eq!(next_nanos(10, 100), 101);
+        // 初回 (last = 0)
+        assert_eq!(next_nanos(0, 0), 1);
+    }
+
+    #[test]
+    fn ids_are_strictly_increasing_in_one_process() {
+        let ids: Vec<String> = (0..1000).map(|_| new_id()).collect();
+        assert!(ids.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn read_entry_of_vanished_file_is_none() {
+        let dir = tempdir().unwrap();
+        let corrupt = dir.path().join("corrupt");
+        fs::create_dir_all(&corrupt).unwrap();
+        // 一覧に載ったあと、別のプロセスが消したファイル
+        let gone = dir.path().join("00000000000000000001-1.json");
+        assert!(read_entry(&gone, &corrupt).unwrap().is_none());
+    }
+
+    #[test]
+    fn retry_and_discard_of_missing_id_are_errors() {
+        let dir = tempdir().unwrap();
+        let q = Queue::open(dir.path()).unwrap();
+        assert!(q.retry_failed("nothing").is_err());
+        assert!(q.discard_failed("nothing").is_err());
+    }
+
+    #[test]
+    fn corrupt_file_is_moved_aside_and_queue_keeps_working() {
+        let dir = tempdir().unwrap();
+        let q = Queue::open(dir.path()).unwrap();
+        let pending = dir.path().join("queue/pending");
+        // 有効な項目より前の名前に壊れたファイルを置く
+        fs::write(pending.join("00000000000000000000-1-bad.json"), "これは JSON ではない").unwrap();
+        // 知らない Job の種類も壊れたものとして扱う
+        fs::write(
+            pending.join("00000000000000000000-2-unknown.json"),
+            r#"{"id":"x","job":{"Nope":{}},"attempts":0,"not_before":{"secs_since_epoch":0,"nanos_since_epoch":0},"last_error":null}"#,
+        )
+        .unwrap();
+        q.push(embed("ok")).unwrap();
+
+        let e = q.next_ready(SystemTime::now() + Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(e.job, embed("ok"));
+        assert!(!pending.join("00000000000000000000-1-bad.json").exists());
+        assert!(!pending.join("00000000000000000000-2-unknown.json").exists());
+        let corrupt = dir.path().join("queue/corrupt");
+        assert!(corrupt.join("00000000000000000000-1-bad.json").exists());
+        assert!(corrupt.join("00000000000000000000-2-unknown.json").exists());
+        assert!(q.earliest_wait().unwrap().is_some());
+        assert!(q.failed().unwrap().is_empty());
     }
 }
