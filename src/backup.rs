@@ -40,19 +40,23 @@ pub fn commit_export(
 
     git_ok(repo, &["add", "--", file_name])?;
     // 0 なら、書き出したファイルに commit するほどの差がない
-    if git(repo, &["diff", "--cached", "--quiet", "--", file_name])?.status.success() {
-        return Ok(Outcome::NoChanges);
-    }
-    // 書き出したファイルだけを commit する (ほかに stage 済みのものを巻き込まない)
-    git_ok(repo, &["commit", "-m", message, "--", file_name])?;
+    let outcome = if git(repo, &["diff", "--cached", "--quiet", "--", file_name])?.status.success() {
+        Outcome::NoChanges
+    } else {
+        // 書き出したファイルだけを commit する (ほかに stage 済みのものを巻き込まない)
+        git_ok(repo, &["commit", "-m", message, "--", file_name])?;
+        Outcome::Committed
+    };
 
+    // 変更がなくても push する。前回 push に失敗した commit が残っていれば、再試行でここから届く
+    // (送るものがなければ push は何もせず成功する)
     if push {
         let out = git(repo, &["push"])?;
         if !out.status.success() {
             return Err(Error::Transient(format!("git push に失敗しました: {}", describe(&out))));
         }
     }
-    Ok(Outcome::Committed)
+    Ok(outcome)
 }
 
 /// main を `<graph>.jsonl` に書き出して commit する。`backup.repo` がなければ何もしない。
@@ -149,6 +153,33 @@ mod tests {
         assert!(matches!(err, Error::Transient(_)), "{err:?}");
         // commit は残る
         assert_eq!(git_in(repo.path(), &["log", "-1", "--format=%s"]).trim(), "msg");
+    }
+
+    #[test]
+    fn retry_pushes_commit_left_by_failed_push() {
+        let repo = init_repo();
+        // remote がないので push は失敗し、commit だけが残る
+        let err = commit_export(repo.path(), "g.jsonl", "x\n", "msg", true).unwrap_err();
+        assert!(matches!(err, Error::Transient(_)), "{err:?}");
+        assert_eq!(git_in(repo.path(), &["rev-list", "--count", "HEAD"]).trim(), "1");
+
+        // あとから remote と upstream を用意する (push はしない)
+        let remote = tempdir().unwrap();
+        git_in(remote.path(), &["init", "-q", "--bare"]);
+        let remote_path = remote.path().to_str().unwrap();
+        let branch = git_in(repo.path(), &["branch", "--show-current"]).trim().to_string();
+        git_in(repo.path(), &["remote", "add", "origin", remote_path]);
+        git_in(repo.path(), &["config", &format!("branch.{branch}.remote"), "origin"]);
+        git_in(repo.path(), &["config", &format!("branch.{branch}.merge"), &format!("refs/heads/{branch}")]);
+
+        // 同じ中身の再試行は commit するものがなくても、残っている commit を push する
+        let r = commit_export(repo.path(), "g.jsonl", "x\n", "msg", true).unwrap();
+        assert_eq!(r, Outcome::NoChanges);
+        assert_eq!(git_in(repo.path(), &["rev-list", "--count", "HEAD"]).trim(), "1");
+        assert_eq!(
+            git_in(remote.path(), &["rev-parse", "HEAD"]).trim(),
+            git_in(repo.path(), &["rev-parse", "HEAD"]).trim()
+        );
     }
 
     #[test]
