@@ -108,7 +108,7 @@ node Source {
 - 保守: `--worker`、`--reembed`、`--backup`
 - skill の書き出し: `--skill-export <dir> [--force]`
 - `--json` を付けると、結果は標準出力の JSON、失敗は標準エラーの JSON になる (エージェント向け)
-- 取り消せない操作 (`--delete`、`--merge`、`--discard`) は `--yes` がないと何もしない
+- 取り消せない操作 (`--delete`、`--merge`、`--discard`) は `--yes` がないと何もせずエラー (終了コード 2) で止まる
 - エージェント向けの設計は `docs/superpowers/specs/2026-11-20-zettelist-agent-cli-design.md`、skill の本文は `skill/SKILL.md`
 
 ### inbox (最初の画面)

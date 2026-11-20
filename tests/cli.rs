@@ -68,7 +68,7 @@ fn no_body_shows_tui_notice() {
     let output = zl(dir.path()).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("TUI は計画 3 で作ります"), "stdout: {stdout}");
+    assert!(stdout.contains("TUI はまだありません"), "stdout: {stdout}");
 }
 
 #[test]

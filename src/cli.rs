@@ -289,7 +289,12 @@ fn fail(json: bool, e: &Error) -> ExitCode {
 fn dispatch(json: bool, action: Action) -> Result<(), Error> {
     match action {
         Action::Tui => {
-            output(json, json!({"ok": true}), "TUI は計画 3 で作ります");
+            if json {
+                return Err(Error::Invalid(
+                    "TUI はまだありません。操作は --inbox などのオプションで行います".into(),
+                ));
+            }
+            println!("TUI はまだありません");
             Ok(())
         }
         Action::Backup => backup_now(json),

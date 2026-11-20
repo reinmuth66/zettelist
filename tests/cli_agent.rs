@@ -1081,3 +1081,14 @@ fn mentions_option_tells_retry_from_retry_all() {
     assert!(mentions_option("`--retry` と `--retry-all`", "--retry"));
     assert!(!mentions_option("zl --promote", "-s"));
 }
+
+#[test]
+fn json_without_action_is_an_error_not_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl(dir.path()).arg("--json").output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+    assert_eq!(err["kind"], "invalid");
+    assert!(err["error"].as_str().is_some_and(|m| m.contains("TUI はまだありません")), "{err}");
+    assert!(output.stdout.is_empty());
+}
