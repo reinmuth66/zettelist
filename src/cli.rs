@@ -20,7 +20,7 @@ use std::process::ExitCode;
 /// Zettelkasten on Omnigraph の書き込みと整理の道具
 #[derive(Parser)]
 #[command(name = "zettelist", version)]
-#[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "adopt", "reject", "undecide", "merge", "failed", "retry", "retry_all", "discard"]).multiple(false))]
+#[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "adopt", "reject", "undecide", "merge", "failed", "retry", "retry_all", "discard", "skill_export"]).multiple(false))]
 #[command(group = ArgGroup::new("promote_body").args(["promote_body_text", "promote_body_file"]).multiple(false))]
 struct Cli {
     /// 出典 (ISBN、DOI、arXiv ID、URL、または登録済みのスラッグ)
@@ -101,7 +101,7 @@ struct Cli {
         value_name = "理由",
         requires = "adopt",
         // 別の操作が選ばれていると `requires` だけでは弾けないので、並べて排他にする
-        conflicts_with_all = ["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "reject", "undecide", "merge", "failed", "retry", "retry_all", "discard"]
+        conflicts_with_all = ["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "reject", "undecide", "merge", "failed", "retry", "retry_all", "discard", "skill_export"]
     )]
     reason: Option<String>,
 
@@ -132,6 +132,19 @@ struct Cli {
     /// 失敗したジョブ 1 件を捨てる。`--yes` が要る
     #[arg(long, value_name = "ID")]
     discard: Option<String>,
+
+    /// エージェント向けの skill (SKILL.md) をそのディレクトリに書き出す (なければ作る)
+    #[arg(long, value_name = "ディレクトリ")]
+    skill_export: Option<String>,
+
+    /// `--skill-export` で、すでにある SKILL.md を上書きする
+    #[arg(
+        long,
+        requires = "skill_export",
+        // 別の操作が選ばれていると `requires` だけでは弾けないので、並べて排他にする
+        conflicts_with_all = ["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "adopt", "reject", "undecide", "merge", "failed", "retry", "retry_all", "discard"]
+    )]
+    force: bool,
 
     /// 消す・捨てる・マージするを確かめた上で行う
     #[arg(long)]
@@ -164,6 +177,7 @@ enum Action {
     Retry(String),
     RetryAll,
     Discard { id: String, yes: bool },
+    SkillExport { dir: String, force: bool },
     Tui,
 }
 
@@ -208,6 +222,8 @@ impl Cli {
             Action::RetryAll
         } else if let Some(id) = self.discard {
             Action::Discard { id, yes: self.yes }
+        } else if let Some(dir) = self.skill_export {
+            Action::SkillExport { dir, force: self.force }
         } else if let Some(body) = self.body {
             Action::Write(NewNote { body, source: self.source, locator: self.locator, created: Local::now() })
         } else {
@@ -303,6 +319,7 @@ fn dispatch(json: bool, action: Action) -> Result<(), Error> {
         Action::Retry(id) => retry(json, &id),
         Action::RetryAll => retry_all(json),
         Action::Discard { id, yes } => discard(json, &id, yes),
+        Action::SkillExport { dir, force } => skill_export(json, &dir, force),
     }
 }
 
@@ -589,6 +606,13 @@ fn discard(json: bool, id: &str, yes: bool) -> Result<(), Error> {
     let ctx = Ctx::from_env()?;
     ctx.queue.discard_failed(id)?;
     output(json, json!({"ok": true}), &format!("捨てました {id}"));
+    Ok(())
+}
+
+/// `--skill-export <dir> [--force]`。サーバーにも設定にも触らない。
+fn skill_export(json: bool, dir: &str, force: bool) -> Result<(), Error> {
+    crate::skill::export(std::path::Path::new(dir), force)?;
+    output(json, json!({"ok": true}), &format!("skill を書き出しました {dir}/SKILL.md"));
     Ok(())
 }
 

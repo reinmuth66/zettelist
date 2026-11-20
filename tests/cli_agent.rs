@@ -1000,3 +1000,63 @@ fn failed_option_usage_errors() {
         assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
     }
 }
+
+#[test]
+fn skill_export_writes_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // 存在しない入れ子のディレクトリも作る
+    let target = dir.path().join("skills/zettelist");
+    let output = zl(dir.path()).args(["--skill-export", target.to_str().unwrap(), "--json"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let out: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(out, serde_json::json!({"ok": true}));
+    let text = std::fs::read_to_string(target.join("SKILL.md")).unwrap();
+    assert!(text.starts_with("---\nname: zettelist\n"), "{text}");
+}
+
+#[test]
+fn skill_export_refuses_overwrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("out");
+    let path = target.to_str().unwrap();
+    assert!(zl(dir.path()).args(["--skill-export", path]).output().unwrap().status.success());
+    std::fs::write(target.join("SKILL.md"), "古い内容").unwrap();
+
+    let output = zl(dir.path()).args(["--skill-export", path, "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err = stderr_json(&output);
+    assert_eq!(err["kind"], "invalid");
+    assert!(err["error"].as_str().unwrap().contains("--force"), "{err}");
+    assert_eq!(std::fs::read_to_string(target.join("SKILL.md")).unwrap(), "古い内容");
+
+    let output = zl(dir.path()).args(["--skill-export", path, "--force"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(std::fs::read_to_string(target.join("SKILL.md")).unwrap().starts_with("---\nname: zettelist\n"));
+}
+
+#[test]
+fn skill_export_option_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("out");
+    let path = target.to_str().unwrap();
+    for args in [
+        vec!["--skill-export", path, "--inbox"],
+        vec!["--skill-export", path, "本文"],
+        vec!["--force"],
+        vec!["--inbox", "--force"],
+    ] {
+        let output = zl(dir.path()).args(&args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    assert!(!target.exists());
+}
+
+#[test]
+fn skill_mentions_every_action() {
+    for option in [
+        "--inbox", "--show", "--similar", "--promote", "--delete", "--review", "--adopt", "--reject", "--undecide",
+        "--merge", "--failed", "--retry", "--retry-all", "--discard", "--yes", "--skill-export", "--json",
+    ] {
+        assert!(zettelist::skill::SKILL.contains(option), "skill に {option} がありません");
+    }
+}

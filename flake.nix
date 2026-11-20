@@ -20,6 +20,8 @@
           cargoLock.lockFile = ./Cargo.lock;
           # nix のビルドの中には omnigraph-server がないので、統合テストは流さない
           cargoTestFlags = [ "--lib" ];
+          # backup のテストが git を呼ぶ
+          nativeCheckInputs = [ pkgs.git ];
         };
       });
 
