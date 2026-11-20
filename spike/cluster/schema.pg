@@ -47,9 +47,11 @@ edge Cites: Literature -> Source @card(1..1) {
 edge DerivedFrom: Permanent -> Fleeting
 edge DerivedFromLit: Permanent -> Literature
 edge Links: Permanent -> Permanent {
+  @key(@src, @dst)
   reason: String?
   similarity: F32
 }
 edge Includes: Hub -> Permanent {
+  @key(@src, @dst)
   position: I32?
 }

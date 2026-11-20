@@ -48,6 +48,7 @@ TUI に持たせないもの: Permanent の閲覧とリンクのたどり歩き�
 
 ```
 edge Links: Permanent -> Permanent {
+  @key(@src, @dst)       // 同じ組は 1 本にする (確認済み、「計画 2 の確認の結果」)
   reason: String?        // 利用者が書いたときだけ
   similarity: F32        // 提案したときのベクトルの近さ (型は Omnigraph で使えるものを builder が選ぶ)
 }
@@ -416,15 +417,31 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 3. 埋め込みは書き込み時に自動では入らない。zl が作る (「設定」の節)。`nearest` の距離は取れるので、`min_similarity` での足切りはそのままできる
 4. 待ち受けは `--bind 127.0.0.1:8080` で決める。設定の `server` の初期値は `http://127.0.0.1:8080` のまま
 
-### まだ確かめていないこと (計画 2 の最初に確かめる)
+### 計画 2 の確認の結果 (2026-11-20)
 
-確認 2 で試したのは「main を review に取り込む」と「review を main にマージする」の 1 往復だけ。review を 1 本で使い続ける前提には、次の 3 点が要る。
+「まだ確かめていないこと」の 3 点は、すべてできた。詳細は同じ確認の記録の「計画 2 の確認」の節。
 
-1. review を main にマージしたあと、もう一度 main を review に取り込み、提案を書けるか (2 回目以降の往復)
-2. 却下した提案のエッジを review から消してから、review を main にマージできるか
-3. 同じ組のリンクをもう一度提案したとき、エッジが重複しないか。`@key` のないエッジは insert のたびに増えるので、`Links` に `@key(@src, @dst)` を付けるかを決める (付けると同じ組は upsert になる)
+1. 2 回目以降の往復: review を main にマージしたあと、main に Permanent を足し、`branch merge main into review` で取り込めば、その Permanent へのリンクを review に書ける。往復を重ねても問題ない
+2. 却下: review に書いたリンクを `mutate --branch review` の `delete Links where @src = $a and @dst = $b` で消してから review を main にマージすると、消したリンクは main に入らず、残したリンクだけが入る。`where` で `@src` と `@dst` を `and` でつなげる。存在しない組を消しても失敗しない (何も変わらない)。delete は insert と同じクエリに混ぜられない
+3. 重複: `Links` と `Includes` には、本体の先頭に `@key(@src, @dst)` を付ける。同じ組を `load --mode merge` で何度書いても 1 本で、2 回目に `reason` を付けると 1 本のまま `reason` が入る。同じ組を再び提案すると、既存のエッジの `similarity` と `reason` が上書きされる。すでに採用したリンクの `reason` を消さないよう、zl は提案の前に既存のリンクを調べて除く
 
-ほかに、`omnigraph embed` を使う方法 (埋め込みの方法 b) を選ぶなら、それも確かめる。
+```
+edge Links: Permanent -> Permanent {
+  @key(@src, @dst)
+  reason: String?
+  similarity: F32
+}
+edge Includes: Hub -> Permanent {
+  @key(@src, @dst)
+  position: I32?
+}
+```
+
+削除については次のとおり。ノードを消すと、そのノードにつながるエッジは一緒に消える (`delete Literature` で Cites、`delete Fleeting` で DerivedFrom、`delete Permanent` で Links)。Cites だけを消すことは `@card(1..1)` で拒否される。したがって「Cites を消してから Literature を消す」手順は要らず、ノードの種類ごとに delete だけのクエリを 1 回流せばよい。
+
+サーバーが止まっているときの終了コードと出力、`query --json` の形は、確認の記録に書いた。zl はエラーを、終了コードではなく `--json` の標準出力の JSON (`request_dispatched`、`http_status`、`code`) で分類する。
+
+ほかに、`omnigraph embed` を使う方法 (埋め込みの方法 b) を選ぶなら、それは別に確かめる。
 
 ## 未確認事項
 
