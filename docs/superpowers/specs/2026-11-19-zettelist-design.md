@@ -100,6 +100,16 @@ node Source {
 - サブコマンドは持たない。`zl` だけなら TUI、`zl "<本文>"` は必ずメモとして書く
 - ほかの操作は `--` で始まるオプション (例: `zl --backup`、`zl --worker`)
 - 本文が `-` で始まるときは `zl -- "<本文>"`
+- 操作のオプションは同時に 1 つだけ。本文や `-s` `-p` とも組み合わせられない
+- 読む: `--inbox`、`--show <slug>`、`--similar <slug>`
+- 昇格と削除: `--promote <slug,...> --title <題> (--body <本文> | --body-file <パス>)`、`--delete <slug,...> --yes`
+- レビュー: `--review`、`--adopt <キー> [--reason <理由>]`、`--reject <キー>`、`--undecide <キー>`、`--merge --yes`
+- 失敗したジョブ: `--failed`、`--retry <id>`、`--retry-all`、`--discard <id> --yes`
+- 保守: `--worker`、`--reembed`、`--backup`
+- skill の書き出し: `--skill-export <dir> [--force]`
+- `--json` を付けると、結果は標準出力の JSON、失敗は標準エラーの JSON になる (エージェント向け)
+- 取り消せない操作 (`--delete`、`--merge`、`--discard`) は `--yes` がないと何もしない
+- エージェント向けの設計は `docs/superpowers/specs/2026-11-20-zettelist-agent-cli-design.md`、skill の本文は `skill/SKILL.md`
 
 ### inbox (最初の画面)
 
