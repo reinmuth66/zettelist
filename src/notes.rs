@@ -412,3 +412,41 @@ pub fn nearest(
     found.truncate(limit);
     Ok(found)
 }
+
+/// `show_note` が返す、種類を問わないノート 1 件。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Note {
+    pub kind: NoteKind,
+    pub slug: String,
+    /// Permanent だけが持つ
+    pub title: Option<String>,
+    pub body: String,
+    pub created: DateTime<Utc>,
+}
+
+/// slug のノートを、Fleeting、Literature、Permanent の順に探して返す。
+/// どれにもなければ `Error::Invalid`。
+pub fn show_note(og: &Omnigraph, slug: &str) -> Result<Note, Error> {
+    for kind in [NoteKind::Fleeting, NoteKind::Literature, NoteKind::Permanent] {
+        let title = if kind == NoteKind::Permanent { ", $n.title as title" } else { "" };
+        let q = format!(
+            "query q($s: String) {{ match {{ $n: {t} {{ slug: $s }} }} \
+             return {{ $n.slug as slug, $n.body as body, $n.created as created{title} }} }}",
+            t = kind.node_type(),
+        );
+        let rows = og.query(BRANCH, &q, json!({ "s": slug }))?;
+        let Some(r) = rows.first() else { continue };
+        let created = text(r, "created")
+            .and_then(|s| parse_created(&s))
+            .ok_or_else(|| Error::Permanent(format!("created を読めません: {r:?}")))?
+            .and_utc();
+        return Ok(Note {
+            kind,
+            slug: slug.to_string(),
+            title: text(r, "title"),
+            body: r.get("body").and_then(Value::as_str).unwrap_or_default().to_string(),
+            created,
+        });
+    }
+    Err(Error::Invalid(format!("ノート '{slug}' はありません")))
+}

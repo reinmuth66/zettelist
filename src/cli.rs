@@ -5,11 +5,11 @@
 
 use crate::backup::{self, Outcome};
 use crate::error::Error;
-use crate::notes::{write_note, NewNote};
+use crate::notes::{get_embedding, inbox, nearest, show_note, write_note, NewNote, Near, NoteKind};
 use crate::queue::Job;
 use crate::worker::{reembed_all, run_worker, run_worker_once, spawn_worker};
 use crate::Ctx;
-use chrono::Local;
+use chrono::{DateTime, Local, SecondsFormat, Utc};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser};
 use serde_json::json;
@@ -18,7 +18,7 @@ use std::process::ExitCode;
 /// Zettelkasten on Omnigraph の書き込みと整理の道具
 #[derive(Parser)]
 #[command(name = "zettelist", version)]
-#[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "review"]).multiple(false))]
+#[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "show", "similar", "review"]).multiple(false))]
 struct Cli {
     /// 出典 (ISBN、DOI、arXiv ID、URL、または登録済みのスラッグ)
     #[arg(short = 's', long = "source", value_name = "出典", conflicts_with = "action")]
@@ -56,6 +56,14 @@ struct Cli {
     #[arg(long)]
     inbox: bool,
 
+    /// ノート 1 件の全文
+    #[arg(long, value_name = "スラッグ")]
+    show: Option<String>,
+
+    /// そのノートに近い inbox と Permanent
+    #[arg(long, value_name = "スラッグ")]
+    similar: Option<String>,
+
     /// 提案の一覧
     #[arg(long)]
     review: bool,
@@ -68,6 +76,8 @@ enum Action {
     Reembed,
     Backup,
     Inbox,
+    Show(String),
+    Similar(String),
     Review,
     Tui,
 }
@@ -82,6 +92,10 @@ impl Cli {
             Action::Backup
         } else if self.inbox {
             Action::Inbox
+        } else if let Some(slug) = self.show {
+            Action::Show(slug)
+        } else if let Some(slug) = self.similar {
+            Action::Similar(slug)
         } else if self.review {
             Action::Review
         } else if let Some(body) = self.body {
@@ -165,9 +179,168 @@ fn dispatch(json: bool, action: Action) -> Result<(), Error> {
             Ok(())
         }
         Action::Write(note) => write(json, note),
+        Action::Inbox => inbox_list(json),
+        Action::Show(slug) => show(json, &slug),
+        Action::Similar(slug) => similar(json, &slug),
         // 次のタスクで実装する
-        Action::Inbox | Action::Review => Err(Error::Permanent("未実装".to_string())),
+        Action::Review => Err(Error::Permanent("未実装".to_string())),
     }
+}
+
+fn kind_name(kind: NoteKind) -> &'static str {
+    match kind {
+        NoteKind::Fleeting => "fleeting",
+        NoteKind::Literature => "literature",
+        NoteKind::Permanent => "permanent",
+    }
+}
+
+/// 人向けの一覧に出す本文の 1 行 (最初の行を 60 文字まで)。
+fn one_line(body: &str) -> String {
+    let first = body.lines().next().unwrap_or("");
+    let mut line: String = first.chars().take(60).collect();
+    if first.chars().count() > 60 || body.lines().nth(1).is_some() {
+        line.push('…');
+    }
+    line
+}
+
+fn rfc3339(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// 類似度は JSON では小数 4 桁にそろえる。
+fn rounded(similarity: f32) -> f64 {
+    (f64::from(similarity) * 1e4).round() / 1e4
+}
+
+/// `--inbox`
+fn inbox_list(json: bool) -> Result<(), Error> {
+    let ctx = Ctx::from_env()?;
+    let items = inbox(&ctx.og)?;
+    let now = Utc::now();
+    let value: Vec<_> = items
+        .iter()
+        .map(|i| {
+            json!({
+                "kind": kind_name(i.kind),
+                "slug": i.slug,
+                "body": i.body,
+                "created": rfc3339(i.created),
+                "old": i.is_old(now),
+                "source_id": i.source_id,
+                "source_slug": i.source_slug,
+                "locator": i.locator,
+            })
+        })
+        .collect();
+    let human = if items.is_empty() {
+        "整理されていないメモはありません".to_string()
+    } else {
+        items
+            .iter()
+            .map(|i| {
+                let old = if i.is_old(now) { " (古い)" } else { "" };
+                format!("{}  {}{}  {}", i.slug, kind_name(i.kind), old, one_line(&i.body))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    output(json, json!(value), &human);
+    Ok(())
+}
+
+/// `--show <slug>`
+fn show(json: bool, slug: &str) -> Result<(), Error> {
+    let ctx = Ctx::from_env()?;
+    let note = show_note(&ctx.og, slug)?;
+    let human = match &note.title {
+        Some(title) => format!("{} {}\n{title}\n\n{}", note.slug, kind_name(note.kind), note.body),
+        None => format!("{} {}\n\n{}", note.slug, kind_name(note.kind), note.body),
+    };
+    output(
+        json,
+        json!({
+            "kind": kind_name(note.kind),
+            "slug": note.slug,
+            "title": note.title,
+            "body": note.body,
+            "created": rfc3339(note.created),
+        }),
+        &human,
+    );
+    Ok(())
+}
+
+/// inbox に出す近いノートの上限
+const SIMILAR_INBOX: usize = 10;
+/// Permanent に出す近いノートの上限
+const SIMILAR_PERMANENT: usize = 3;
+
+/// `--similar <slug>`
+fn similar(json: bool, slug: &str) -> Result<(), Error> {
+    let ctx = Ctx::from_env()?;
+    let me = show_note(&ctx.og, slug)?;
+    let min = ctx.config.link.inbox_similarity;
+    let (inbox_near, permanent_near) = match get_embedding(&ctx.og, me.kind, &me.slug)? {
+        // 埋め込みがまだなら、どちらも空
+        None => (Vec::new(), Vec::new()),
+        Some(v) => {
+            // 自分が上位に入りうるので、1 件多く引いてから自分を除く
+            let not_me = |n: &Near| !(n.kind == me.kind && n.slug == me.slug);
+            let mut inbox_near =
+                nearest(&ctx.og, "main", &[NoteKind::Fleeting, NoteKind::Literature], &v, SIMILAR_INBOX + 1, min)?;
+            inbox_near.retain(not_me);
+            inbox_near.truncate(SIMILAR_INBOX);
+            let mut permanent_near = nearest(&ctx.og, "main", &[NoteKind::Permanent], &v, SIMILAR_PERMANENT + 1, min)?;
+            permanent_near.retain(not_me);
+            permanent_near.truncate(SIMILAR_PERMANENT);
+            (inbox_near, permanent_near)
+        }
+    };
+    let value = json!({
+        "inbox": inbox_near.iter().map(|n| json!({
+            "kind": kind_name(n.kind),
+            "slug": n.slug,
+            "body": n.body,
+            "similarity": rounded(n.similarity),
+        })).collect::<Vec<_>>(),
+        "permanent": permanent_near.iter().map(|n| json!({
+            "slug": n.slug,
+            "title": n.title,
+            "body": n.body,
+            "similarity": rounded(n.similarity),
+        })).collect::<Vec<_>>(),
+    });
+    let section = |title: &str, lines: Vec<String>| {
+        if lines.is_empty() {
+            format!("{title}\n  (なし)")
+        } else {
+            format!("{title}\n{}", lines.join("\n"))
+        }
+    };
+    let human = format!(
+        "{}\n{}",
+        section(
+            "inbox",
+            inbox_near
+                .iter()
+                .map(|n| format!("  {:.2}  {}  {}  {}", n.similarity, n.slug, kind_name(n.kind), one_line(&n.body)))
+                .collect(),
+        ),
+        section(
+            "permanent",
+            permanent_near
+                .iter()
+                .map(|n| {
+                    let title = n.title.as_deref().unwrap_or("");
+                    format!("  {:.2}  {}  {}  {}", n.similarity, n.slug, title, one_line(&n.body))
+                })
+                .collect(),
+        ),
+    );
+    output(json, value, &human);
+    Ok(())
 }
 
 /// `--backup`
