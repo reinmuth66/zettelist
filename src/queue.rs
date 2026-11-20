@@ -51,6 +51,11 @@ fn io_err(what: &str, path: &Path, e: std::io::Error) -> Error {
     Error::Permanent(format!("{what}に失敗しました ({}): {e}", path.display()))
 }
 
+/// 指定された id が failed に無い。指定の誤りなので入力の誤りとして返す。
+fn missing_failed(id: &str) -> Error {
+    Error::Invalid(format!("失敗の中に {id} はありません"))
+}
+
 /// 時計が止まっても戻っても、前に使った値より必ず大きくする
 fn next_nanos(now: u128, last: u128) -> u128 {
     now.max(last + 1)
@@ -187,10 +192,20 @@ impl Queue {
         list(&self.failed, &self.corrupt)
     }
 
+    /// failed の項目のパス。id が単なるファイル名でなければ、探しても無いものとして入力の誤りにする。
+    fn failed_path(&self, id: &str) -> Result<PathBuf, Error> {
+        let plain = !id.is_empty() && !id.starts_with('.') && !id.contains(['/', '\\']);
+        if plain {
+            Ok(entry_path(&self.failed, id))
+        } else {
+            Err(missing_failed(id))
+        }
+    }
+
     pub fn retry_failed(&self, id: &str) -> Result<(), Error> {
-        match read_entry(&entry_path(&self.failed, id), &self.corrupt)? {
+        match read_entry(&self.failed_path(id)?, &self.corrupt)? {
             Some(entry) => self.requeue(entry),
-            None => Err(Error::Permanent(format!("失敗の中に {id} はありません"))),
+            None => Err(missing_failed(id)),
         }
     }
 
@@ -202,12 +217,10 @@ impl Queue {
     }
 
     pub fn discard_failed(&self, id: &str) -> Result<(), Error> {
-        let path = entry_path(&self.failed, id);
+        let path = self.failed_path(id)?;
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == ErrorKind::NotFound => {
-                Err(Error::Permanent(format!("失敗の中に {id} はありません")))
-            }
+            Err(e) if e.kind() == ErrorKind::NotFound => Err(missing_failed(id)),
             Err(e) => Err(io_err("削除", &path, e)),
         }
     }
@@ -367,8 +380,21 @@ mod tests {
     fn retry_and_discard_of_missing_id_are_errors() {
         let dir = tempdir().unwrap();
         let q = Queue::open(dir.path()).unwrap();
-        assert!(q.retry_failed("nothing").is_err());
-        assert!(q.discard_failed("nothing").is_err());
+        assert!(matches!(q.retry_failed("nothing"), Err(Error::Invalid(m)) if m.contains("ありません")));
+        assert!(matches!(q.discard_failed("nothing"), Err(Error::Invalid(m)) if m.contains("ありません")));
+    }
+
+    #[test]
+    fn path_like_ids_are_invalid_and_touch_nothing() {
+        let dir = tempdir().unwrap();
+        let q = Queue::open(dir.path()).unwrap();
+        let id = q.push(embed("a")).unwrap();
+        // pending にある項目を、failed からの相対で指しても触れない
+        let sneaky = format!("../pending/{id}");
+        assert!(matches!(q.retry_failed(&sneaky), Err(Error::Invalid(_))));
+        assert!(matches!(q.discard_failed(&sneaky), Err(Error::Invalid(_))));
+        assert!(matches!(q.discard_failed(""), Err(Error::Invalid(_))));
+        assert!(q.next_ready(SystemTime::now() + Duration::from_secs(1)).unwrap().is_some());
     }
 
     #[test]

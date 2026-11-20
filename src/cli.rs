@@ -20,7 +20,7 @@ use std::process::ExitCode;
 /// Zettelkasten on Omnigraph の書き込みと整理の道具
 #[derive(Parser)]
 #[command(name = "zettelist", version)]
-#[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "adopt", "reject", "undecide", "merge"]).multiple(false))]
+#[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "adopt", "reject", "undecide", "merge", "failed", "retry", "retry_all", "discard"]).multiple(false))]
 #[command(group = ArgGroup::new("promote_body").args(["promote_body_text", "promote_body_file"]).multiple(false))]
 struct Cli {
     /// 出典 (ISBN、DOI、arXiv ID、URL、または登録済みのスラッグ)
@@ -101,7 +101,7 @@ struct Cli {
         value_name = "理由",
         requires = "adopt",
         // 別の操作が選ばれていると `requires` だけでは弾けないので、並べて排他にする
-        conflicts_with_all = ["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "reject", "undecide", "merge"]
+        conflicts_with_all = ["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "reject", "undecide", "merge", "failed", "retry", "retry_all", "discard"]
     )]
     reason: Option<String>,
 
@@ -116,6 +116,22 @@ struct Cli {
     /// 採用した提案を main に取り込み、却下したものを捨てる。`--yes` が要る
     #[arg(long)]
     merge: bool,
+
+    /// 失敗したジョブの一覧
+    #[arg(long)]
+    failed: bool,
+
+    /// 失敗したジョブ 1 件をやり直す (id は `--failed` に出る)
+    #[arg(long, value_name = "ID")]
+    retry: Option<String>,
+
+    /// 失敗したジョブをすべてやり直す
+    #[arg(long)]
+    retry_all: bool,
+
+    /// 失敗したジョブ 1 件を捨てる。`--yes` が要る
+    #[arg(long, value_name = "ID")]
+    discard: Option<String>,
 
     /// 消す・捨てる・マージするを確かめた上で行う
     #[arg(long)]
@@ -144,6 +160,10 @@ enum Action {
     Reject(String),
     Undecide(String),
     Merge { yes: bool },
+    Failed,
+    Retry(String),
+    RetryAll,
+    Discard { id: String, yes: bool },
     Tui,
 }
 
@@ -180,6 +200,14 @@ impl Cli {
             Action::Undecide(key)
         } else if self.merge {
             Action::Merge { yes: self.yes }
+        } else if self.failed {
+            Action::Failed
+        } else if let Some(id) = self.retry {
+            Action::Retry(id)
+        } else if self.retry_all {
+            Action::RetryAll
+        } else if let Some(id) = self.discard {
+            Action::Discard { id, yes: self.yes }
         } else if let Some(body) = self.body {
             Action::Write(NewNote { body, source: self.source, locator: self.locator, created: Local::now() })
         } else {
@@ -271,6 +299,10 @@ fn dispatch(json: bool, action: Action) -> Result<(), Error> {
         Action::Reject(key) => decide_cmd(json, &key, Some(Decision::Reject), "却下しました"),
         Action::Undecide(key) => decide_cmd(json, &key, None, "判断を外しました"),
         Action::Merge { yes } => merge(json, yes),
+        Action::Failed => failed_list(json),
+        Action::Retry(id) => retry(json, &id),
+        Action::RetryAll => retry_all(json),
+        Action::Discard { id, yes } => discard(json, &id, yes),
     }
 }
 
@@ -493,6 +525,70 @@ fn merge(json: bool, yes: bool) -> Result<(), Error> {
         json!({"links": summary.links, "hubs": summary.hubs}),
         &format!("マージしました (リンク {} 本、ハブ {} 件)", summary.links, summary.hubs),
     );
+    Ok(())
+}
+
+/// JSON と一覧に出す、ジョブの種類の名前。
+fn job_name(job: &Job) -> &'static str {
+    match job {
+        Job::WriteNote(_) => "write_note",
+        Job::Embed { .. } => "embed",
+        Job::Promote { .. } => "promote",
+        Job::Backup { .. } => "backup",
+    }
+}
+
+/// `--failed`
+fn failed_list(json: bool) -> Result<(), Error> {
+    let ctx = Ctx::from_env()?;
+    let entries = ctx.queue.failed()?;
+    let value: Vec<_> = entries
+        .iter()
+        .map(|e| json!({"id": e.id, "job": job_name(&e.job), "attempts": e.attempts, "last_error": e.last_error}))
+        .collect();
+    let human = if entries.is_empty() {
+        "失敗したジョブはありません".to_string()
+    } else {
+        entries
+            .iter()
+            .map(|e| {
+                let error = e.last_error.as_deref().map(one_line).unwrap_or_default();
+                format!("{}  {}  {} 回  {error}", e.id, job_name(&e.job), e.attempts)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    output(json, json!(value), &human);
+    Ok(())
+}
+
+/// `--retry <id>`
+fn retry(json: bool, id: &str) -> Result<(), Error> {
+    let ctx = Ctx::from_env()?;
+    ctx.queue.retry_failed(id)?;
+    start_worker(&ctx);
+    output(json, json!({"ok": true}), &format!("やり直しを積みました {id}"));
+    Ok(())
+}
+
+/// `--retry-all`
+fn retry_all(json: bool) -> Result<(), Error> {
+    let ctx = Ctx::from_env()?;
+    let count = ctx.queue.failed()?.len();
+    ctx.queue.retry_all_failed()?;
+    start_worker(&ctx);
+    output(json, json!({"ok": true}), &format!("{count} 件のやり直しを積みました"));
+    Ok(())
+}
+
+/// `--discard <id> --yes`
+fn discard(json: bool, id: &str, yes: bool) -> Result<(), Error> {
+    if !yes {
+        return Err(Error::Invalid("失敗したジョブを捨てるには --yes が要ります".to_string()));
+    }
+    let ctx = Ctx::from_env()?;
+    ctx.queue.discard_failed(id)?;
+    output(json, json!({"ok": true}), &format!("捨てました {id}"));
     Ok(())
 }
 

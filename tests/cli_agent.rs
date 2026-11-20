@@ -813,3 +813,190 @@ fn review_option_usage_errors() {
         assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
     }
 }
+
+// --- 失敗の一覧とやり直し (サーバーなし) ---
+
+use zettelist::queue::{Job, Queue};
+
+/// `state/queue/failed` に項目を作る。積んでから failed へ回し、id の一覧を返す。
+fn make_failed(dir: &std::path::Path, jobs: Vec<(Job, &str)>) -> Vec<String> {
+    let q = Queue::open(&dir.join("state")).unwrap();
+    let now = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
+    jobs.into_iter()
+        .map(|(job, error)| {
+            let id = q.push(job).unwrap();
+            let entry = q.next_ready(now).unwrap().unwrap();
+            assert_eq!(entry.id, id);
+            q.fail(entry, error).unwrap();
+            id
+        })
+        .collect()
+}
+
+fn failed_ids(dir: &std::path::Path) -> Vec<String> {
+    Queue::open(&dir.join("state")).unwrap().failed().unwrap().into_iter().map(|e| e.id).collect()
+}
+
+fn embed_job(slug: &str) -> Job {
+    Job::Embed { kind: zettelist::notes::NoteKind::Fleeting, slug: slug.to_string() }
+}
+
+fn stderr_json(output: &std::process::Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず")
+}
+
+#[test]
+fn failed_json_lists_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let note = zettelist::notes::NewNote {
+        body: "メモ".to_string(),
+        source: None,
+        locator: None,
+        created: chrono::Local::now(),
+    };
+    let ids = make_failed(
+        dir.path(),
+        vec![
+            (Job::WriteNote(note), "書けない"),
+            (embed_job("a"), "届かない"),
+            (Job::Promote { slug: "p".to_string() }, "だめ"),
+            (Job::Backup { message: "m".to_string() }, "push できない"),
+        ],
+    );
+    let output = zl(dir.path()).args(["--failed", "--json"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let out: serde_json::Value = serde_json::from_slice(&output.stdout).expect("stdout は JSON のはず");
+    let list = out.as_array().unwrap();
+    assert_eq!(list.len(), 4, "{out}");
+    let jobs: Vec<_> = list.iter().map(|e| e["job"].as_str().unwrap()).collect();
+    assert_eq!(jobs, ["write_note", "embed", "promote", "backup"]);
+    assert_eq!(list[1]["id"], ids[1].as_str());
+    assert_eq!(list[1]["attempts"], 0);
+    assert_eq!(list[1]["last_error"], "届かない");
+}
+
+#[test]
+fn failed_with_no_entries_is_empty_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl(dir.path()).args(["--failed", "--json"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), serde_json::json!([]));
+    let output = zl(dir.path()).arg("--failed").output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8(output.stdout).unwrap().contains("失敗したジョブはありません"));
+}
+
+#[test]
+fn failed_human_output_shows_id_job_and_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let ids = make_failed(dir.path(), vec![(embed_job("a"), "届かない")]);
+    let output = zl(dir.path()).arg("--failed").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(&ids[0]) && stdout.contains("embed") && stdout.contains("届かない"), "{stdout}");
+}
+
+#[test]
+fn retry_moves_to_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let ids = make_failed(dir.path(), vec![(embed_job("a"), "だめ"), (embed_job("b"), "だめ")]);
+    let output = zl(dir.path()).args(["--retry", &ids[0], "--json"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), serde_json::json!({"ok": true}));
+    assert_eq!(failed_ids(dir.path()), vec![ids[1].clone()]);
+    let items = pending(dir.path());
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], ids[0].as_str());
+    assert_eq!(items[0]["attempts"], 0);
+}
+
+#[test]
+fn retry_all_moves_all() {
+    let dir = tempfile::tempdir().unwrap();
+    make_failed(dir.path(), vec![(embed_job("a"), "だめ"), (embed_job("b"), "だめ")]);
+    let output = zl(dir.path()).args(["--retry-all", "--json"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), serde_json::json!({"ok": true}));
+    assert!(failed_ids(dir.path()).is_empty());
+    assert_eq!(pending(dir.path()).len(), 2);
+}
+
+#[test]
+fn retry_all_with_nothing_failed_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl(dir.path()).args(["--retry-all", "--json"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(pending(dir.path()).is_empty());
+}
+
+#[test]
+fn discard_requires_yes() {
+    let dir = tempfile::tempdir().unwrap();
+    let ids = make_failed(dir.path(), vec![(embed_job("a"), "だめ")]);
+    let output = zl(dir.path()).args(["--discard", &ids[0], "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(stderr_json(&output)["kind"], "invalid");
+    assert!(output.stdout.is_empty());
+    assert_eq!(failed_ids(dir.path()), ids);
+}
+
+#[test]
+fn discard_with_yes_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let ids = make_failed(dir.path(), vec![(embed_job("a"), "だめ"), (embed_job("b"), "だめ")]);
+    let output = zl(dir.path()).args(["--discard", &ids[0], "--yes", "--json"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), serde_json::json!({"ok": true}));
+    assert_eq!(failed_ids(dir.path()), vec![ids[1].clone()]);
+    assert!(pending(dir.path()).is_empty());
+}
+
+#[test]
+fn retry_unknown_is_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let ids = make_failed(dir.path(), vec![(embed_job("a"), "だめ")]);
+    let output = zl(dir.path()).args(["--retry", "nothing", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err = stderr_json(&output);
+    assert_eq!(err["kind"], "invalid");
+    assert!(err["error"].as_str().unwrap().contains("ありません"), "{err}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(failed_ids(dir.path()), ids);
+    assert!(pending(dir.path()).is_empty());
+}
+
+#[test]
+fn discard_unknown_is_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let ids = make_failed(dir.path(), vec![(embed_job("a"), "だめ")]);
+    let output = zl(dir.path()).args(["--discard", "nothing", "--yes", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(stderr_json(&output)["kind"], "invalid");
+    assert_eq!(failed_ids(dir.path()), ids);
+}
+
+#[test]
+fn path_like_id_is_invalid_and_touches_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let ids = make_failed(dir.path(), vec![(embed_job("a"), "だめ")]);
+    let output = zl(dir.path()).args(["--retry", "../failed/x", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(stderr_json(&output)["kind"], "invalid");
+    assert_eq!(failed_ids(dir.path()), ids);
+}
+
+#[test]
+fn failed_option_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["--failed", "--retry-all"],
+        vec!["--retry", "x", "--discard", "y", "--yes"],
+        vec!["--retry-all", "--inbox"],
+        vec!["--failed", "本文"],
+        vec!["--retry", "x", "本文"],
+        vec!["--discard", "x", "--delete", "y", "--yes"],
+    ] {
+        let output = zl(dir.path()).args(&args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+}
