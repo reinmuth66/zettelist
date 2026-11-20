@@ -1,0 +1,16 @@
+# cluster 設定の正本。スキーマ (schema.pg) と埋め込みプロバイダを定める。運用のサーバーもこれを使う。
+version: 1
+state: { backend: cluster, lock: true }
+
+providers:
+  embedding:
+    ollama:
+      kind: openai-compatible
+      base_url: http://localhost:11434/v1
+      model: qwen3-embedding:0.6b
+      api_key: ${OLLAMA_API_KEY}
+
+graphs:
+  zettelkasten:
+    schema: schema.pg
+    embedding_provider: ollama
