@@ -80,7 +80,8 @@ fn parse_isbn(s: &str) -> Option<String> {
         .collect();
     match compact.len() {
         13 if compact.chars().all(|c| c.is_ascii_digit()) => Some(compact),
-        10 => {
+        // バイト長で分岐するので、多バイト文字を含む入力で split_at が panic しないよう ASCII に限る。
+        10 if compact.is_ascii() => {
             let (body, last) = compact.split_at(9);
             let last_ok = last
                 .chars()
@@ -213,5 +214,11 @@ mod tests {
     #[test]
     fn surrounding_spaces_are_trimmed() {
         assert_eq!(SourceRef::parse("  ahrens2017 "), Slug("ahrens2017".into()));
+    }
+    #[test]
+    fn multibyte_slug_of_ten_bytes_does_not_panic() {
+        assert_eq!(SourceRef::parse("a日本語"), Slug("a日本語".into()));
+        assert_eq!(SourceRef::parse("1日本語"), Slug("1日本語".into()));
+        assert_eq!(SourceRef::parse("abcd日本"), Slug("abcd日本".into()));
     }
 }
