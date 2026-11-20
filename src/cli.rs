@@ -13,6 +13,7 @@ use chrono::{DateTime, Local, SecondsFormat, Utc};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser};
 use serde_json::json;
+use std::collections::HashSet;
 use std::process::ExitCode;
 
 /// Zettelkasten on Omnigraph の書き込みと整理の道具
@@ -277,6 +278,20 @@ const SIMILAR_INBOX: usize = 10;
 /// Permanent に出す近いノートの上限
 const SIMILAR_PERMANENT: usize = 3;
 
+/// その種類のノートの件数。
+fn count_notes(og: &crate::omnigraph::Omnigraph, kind: NoteKind) -> Result<usize, Error> {
+    let q = format!("query q() {{ match {{ $n: {} }} return {{ $n.slug as slug }} }}", kind_type(kind));
+    Ok(og.query("main", &q, json!({}))?.len())
+}
+
+fn kind_type(kind: NoteKind) -> &'static str {
+    match kind {
+        NoteKind::Fleeting => "Fleeting",
+        NoteKind::Literature => "Literature",
+        NoteKind::Permanent => "Permanent",
+    }
+}
+
 /// `--similar <slug>`
 fn similar(json: bool, slug: &str) -> Result<(), Error> {
     let ctx = Ctx::from_env()?;
@@ -288,8 +303,17 @@ fn similar(json: bool, slug: &str) -> Result<(), Error> {
         Some(v) => {
             // 自分が上位に入りうるので、1 件多く引いてから自分を除く
             let not_me = |n: &Near| !(n.kind == me.kind && n.slug == me.slug);
-            let mut inbox_near =
-                nearest(&ctx.og, "main", &[NoteKind::Fleeting, NoteKind::Literature], &v, SIMILAR_INBOX + 1, min)?;
+            // inbox は昇格していないものだけ。`nearest` は昇格を見ないので、inbox の組に絞る。
+            // 昇格済みが上位を埋めて本物の inbox を押し出さないよう、Fleeting と Literature の全件まで引く。
+            let members: HashSet<(&str, String)> =
+                inbox(&ctx.og)?.into_iter().map(|i| (kind_name(i.kind), i.slug)).collect();
+            let mut inbox_near = if members.is_empty() {
+                Vec::new()
+            } else {
+                let all = count_notes(&ctx.og, NoteKind::Fleeting)? + count_notes(&ctx.og, NoteKind::Literature)?;
+                nearest(&ctx.og, "main", &[NoteKind::Fleeting, NoteKind::Literature], &v, all.max(members.len() + 1), min)?
+            };
+            inbox_near.retain(|n| members.contains(&(kind_name(n.kind), n.slug.clone())));
             inbox_near.retain(not_me);
             inbox_near.truncate(SIMILAR_INBOX);
             let mut permanent_near = nearest(&ctx.og, "main", &[NoteKind::Permanent], &v, SIMILAR_PERMANENT + 1, min)?;

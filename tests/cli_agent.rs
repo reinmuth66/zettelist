@@ -327,4 +327,52 @@ fn similar_unknown_is_invalid() {
     let dir = tempfile::tempdir().unwrap();
     let output = zl_on(&server, dir.path(), 0.0).args(["--similar", "nosuch", "--json"]).output().unwrap();
     assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+    assert_eq!(err["kind"], "invalid");
+}
+
+#[test]
+fn similar_inbox_excludes_promoted_notes() {
+    let server = TestServer::start();
+    let og = server.og();
+    let now = Local::now();
+    let me = write_note(&og, &new_note("基準", None, now - Duration::hours(4))).unwrap();
+    let promoted = write_note(&og, &new_note("昇格済み", None, now - Duration::hours(3))).unwrap();
+    let live = write_note(&og, &new_note("まだ inbox", None, now - Duration::hours(2))).unwrap();
+    promote(&og, &[(NoteKind::Fleeting, promoted.slug.clone())], "題名", "本文", now).unwrap();
+    // 昇格済みのほうが me に近い
+    set_embedding(&og, NoteKind::Fleeting, &me.slug, &unit(&[(0, 1.0)])).unwrap();
+    set_embedding(&og, NoteKind::Fleeting, &promoted.slug, &unit(&[(0, 1.0), (1, 0.01)])).unwrap();
+    set_embedding(&og, NoteKind::Fleeting, &live.slug, &unit(&[(0, 1.0), (1, 0.5)])).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = json_out(&zl_on(&server, dir.path(), 0.5).args(["--similar", &me.slug, "--json"]).output().unwrap());
+    let slugs: Vec<_> = out["inbox"].as_array().unwrap().iter().map(|n| n["slug"].as_str().unwrap()).collect();
+    assert_eq!(slugs, vec![live.slug.as_str()], "{out}");
+}
+
+#[test]
+fn similar_permanent_excludes_self_and_caps_at_three() {
+    let server = TestServer::start();
+    let og = server.og();
+    let now = Local::now();
+    let src = write_note(&og, &new_note("元", None, now - Duration::hours(10))).unwrap();
+    let mut perms = Vec::new();
+    for i in 0..5 {
+        let p = promote(
+            &og,
+            &[(NoteKind::Fleeting, src.slug.clone())],
+            &format!("題名{i}"),
+            &format!("本文{i}"),
+            now + Duration::hours(i),
+        )
+        .unwrap();
+        set_embedding(&og, NoteKind::Permanent, &p, &unit(&[(0, 1.0), (1, 0.1 * (i + 1) as f32)])).unwrap();
+        perms.push(p);
+    }
+    let me = perms[0].clone();
+    let dir = tempfile::tempdir().unwrap();
+    let out = json_out(&zl_on(&server, dir.path(), 0.0).args(["--similar", &me, "--json"]).output().unwrap());
+    let perm = out["permanent"].as_array().unwrap();
+    assert_eq!(perm.len(), 3, "{out}");
+    assert!(perm.iter().all(|n| n["slug"] != me.as_str()), "{out}");
 }
