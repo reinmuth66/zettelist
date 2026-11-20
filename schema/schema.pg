@@ -1,0 +1,57 @@
+// スキーマの正本。運用のサーバーもこれを使う。
+// 設計書 (docs/superpowers/specs/2026-11-19-zettelist-design.md) と対応する。
+
+node Source {
+  id: String @key
+  slug: String
+  title: String
+  author: String?
+  year: I32?
+  kind: enum(book, paper, article, video, talk, other)
+  url: String?
+  input: String
+  provenance: String
+  accessed: Date?
+}
+
+node Fleeting {
+  slug: String @key
+  body: String
+  created: DateTime
+  embedding: Vector(1024)? @embed("body", model="qwen3-embedding:0.6b") @index
+}
+
+node Literature {
+  slug: String @key
+  body: String
+  created: DateTime
+  embedding: Vector(1024)? @embed("body", model="qwen3-embedding:0.6b") @index
+}
+
+node Permanent {
+  slug: String @key
+  title: String
+  body: String
+  created: DateTime
+  embedding: Vector(1024)? @embed("body", model="qwen3-embedding:0.6b") @index
+}
+
+node Hub {
+  slug: String @key
+  title: String
+}
+
+edge Cites: Literature -> Source @card(1..1) {
+  locator: String?
+}
+edge DerivedFrom: Permanent -> Fleeting
+edge DerivedFromLit: Permanent -> Literature
+edge Links: Permanent -> Permanent {
+  @key(@src, @dst)
+  reason: String?
+  similarity: F32
+}
+edge Includes: Hub -> Permanent {
+  @key(@src, @dst)
+  position: I32?
+}

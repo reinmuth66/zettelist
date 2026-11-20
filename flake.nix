@@ -18,6 +18,8 @@
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
+          # nix のビルドの中には omnigraph-server がないので、統合テストは流さない
+          cargoTestFlags = [ "--lib" ];
         };
       });
 

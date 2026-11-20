@@ -108,11 +108,14 @@ impl Config {
         Ok(config)
     }
 
-    /// `~/.config/zettelist/config.toml` を読む。ファイルがなければ既定値。
-    #[allow(dead_code)] // 計画 2 で使う
+    /// `ZETTELIST_CONFIG` のパス、なければ `~/.config/zettelist/config.toml` を読む。
+    /// ファイルがなければ既定値。
     pub fn load() -> Result<Config, ConfigError> {
         let home = std::env::var_os("HOME").map(PathBuf::from).ok_or(ConfigError::NoHome)?;
-        let path = home.join(".config/zettelist/config.toml");
+        let path = match std::env::var_os("ZETTELIST_CONFIG") {
+            Some(p) => PathBuf::from(p),
+            None => home.join(".config/zettelist/config.toml"),
+        };
         match std::fs::read_to_string(&path) {
             Ok(s) => Config::from_toml_str(&s, &home),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
