@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use zettelist::error::Error;
 use zettelist::notes::{write_note, NewNote};
 use zettelist::queue::Job;
-use zettelist::worker::spawn_worker;
+use zettelist::worker::{reembed_all, run_worker, run_worker_once, spawn_worker};
 use zettelist::Ctx;
 
 /// Zettelkasten on Omnigraph の書き込みと整理の道具
@@ -22,21 +22,52 @@ struct Cli {
     /// 本文。`-` で始まるときは `--` のあとに置く
     #[arg(value_name = "本文")]
     body: Option<String>,
+
+    /// 待ち行列を処理する worker として動く (通常は zl が自分で起動する)
+    #[arg(long)]
+    worker: bool,
+
+    /// worker が ready のものを 1 巡だけ処理して、待ちのあるものを待たずに終わる (テスト用)
+    #[arg(long, hide = true, requires = "worker")]
+    once: bool,
+
+    /// すべてのノートの埋め込みを作り直す
+    #[arg(long)]
+    reembed: bool,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli.worker || cli.reembed {
+        return finish(admin(&cli));
+    }
     let Some(body) = cli.body else {
         println!("TUI は計画 3 で作ります");
         return ExitCode::SUCCESS;
     };
-    match run(NewNote { body, source: cli.source, locator: cli.locator, created: Local::now() }) {
+    finish(run(NewNote { body, source: cli.source, locator: cli.locator, created: Local::now() }))
+}
+
+fn finish(result: Result<(), Error>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// `--worker` と `--reembed`
+fn admin(cli: &Cli) -> Result<(), Error> {
+    let ctx = Ctx::from_env()?;
+    if cli.worker {
+        return if cli.once { run_worker_once(&ctx) } else { run_worker(&ctx) };
+    }
+    let count = reembed_all(&ctx)?;
+    start_worker(&ctx);
+    println!("{count} 件の埋め込みを積みました");
+    Ok(())
 }
 
 fn run(note: NewNote) -> Result<(), Error> {
@@ -66,10 +97,8 @@ fn run(note: NewNote) -> Result<(), Error> {
     }
 }
 
+/// worker の起動に失敗しても、保存は済んでいるので警告だけにする
 fn start_worker(ctx: &Ctx) {
-    if std::env::var_os("ZETTELIST_NO_SPAWN").is_some() {
-        return;
-    }
     if let Err(e) = spawn_worker(&ctx.paths) {
         eprintln!("worker を起動できません: {e}");
     }
