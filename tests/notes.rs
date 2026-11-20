@@ -3,6 +3,7 @@ mod common;
 use chrono::{DateTime, Local, TimeZone};
 use common::TestServer;
 use serde_json::{json, Value};
+use zettelist::error::Error;
 use zettelist::notes::{write_note, NewNote, NoteKind};
 use zettelist::omnigraph::Omnigraph;
 
@@ -140,7 +141,7 @@ fn unknown_slug_is_rejected_and_writes_nothing() {
     let s = TestServer::start();
     let og = s.og();
     let e = write_note(&og, &note("本文", Some("nosuch"), None, at_ten())).unwrap_err();
-    assert!(!e.is_transient());
+    assert!(matches!(e, Error::Invalid(_)), "{e:?}");
     assert_eq!(e.to_string(), "出典 'nosuch' は登録されていません");
     assert_eq!(count(&og, "Fleeting"), 0);
     assert_eq!(count(&og, "Literature"), 0);
@@ -151,7 +152,52 @@ fn blank_body_is_rejected() {
     let s = TestServer::start();
     let og = s.og();
     let e = write_note(&og, &note(" \n\t ", None, None, at_ten())).unwrap_err();
-    assert!(!e.is_transient());
+    assert!(matches!(e, Error::Invalid(_)), "{e:?}");
     assert_eq!(e.to_string(), "本文が空です");
     assert_eq!(count(&og, "Fleeting"), 0);
+}
+
+#[test]
+fn replaying_the_same_note_does_not_duplicate() {
+    let s = TestServer::start();
+    let og = s.og();
+    let n = note("同じメモ", None, None, at_ten());
+    let a = write_note(&og, &n).unwrap();
+    let b = write_note(&og, &n).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a.slug, "20261120100000");
+    assert_eq!(count(&og, "Fleeting"), 1);
+}
+
+#[test]
+fn replaying_a_literature_note_does_not_duplicate() {
+    let s = TestServer::start();
+    let og = s.og();
+    let n = note("引用", Some("978-4-480-06899-8"), Some("p.1"), at_ten());
+    let a = write_note(&og, &n).unwrap();
+    let b = write_note(&og, &n).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a.kind, NoteKind::Literature);
+    assert_eq!(count(&og, "Literature"), 1);
+    assert_eq!(sources(&og).len(), 1);
+}
+
+#[test]
+fn same_second_with_different_body_still_advances() {
+    let s = TestServer::start();
+    let og = s.og();
+    let a = write_note(&og, &note("一件目", None, None, at_ten())).unwrap();
+    let b = write_note(&og, &note("別の本文", None, None, at_ten())).unwrap();
+    assert_ne!(a.slug, b.slug);
+}
+
+#[test]
+fn replaying_a_note_with_milliseconds_does_not_duplicate() {
+    let s = TestServer::start();
+    let og = s.og();
+    let n = note("ミリ秒つき", None, None, at_ten() + chrono::Duration::milliseconds(456));
+    let a = write_note(&og, &n).unwrap();
+    let b = write_note(&og, &n).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(count(&og, "Fleeting"), 1);
 }

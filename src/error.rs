@@ -8,6 +8,8 @@ pub enum Error {
     Transient(String),
     /// 4xx の拒否、設定やデータの誤り。再試行しても通らない。
     Permanent(String),
+    /// 利用者の入力の誤り (空の本文、登録されていない出典)。直してもらうまで通らず、待ち行列にも積まない。
+    Invalid(String),
 }
 
 impl Error {
@@ -19,7 +21,7 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Transient(m) | Error::Permanent(m) => write!(f, "{m}"),
+            Error::Transient(m) | Error::Permanent(m) | Error::Invalid(m) => write!(f, "{m}"),
         }
     }
 }

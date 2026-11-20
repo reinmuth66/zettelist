@@ -51,13 +51,18 @@ fn run(note: NewNote) -> Result<(), Error> {
             println!("保存しました {}", written.slug);
             Ok(())
         }
-        Err(Error::Transient(_)) => {
+        // 入力の誤りは直してもらう。積んでも通らない
+        Err(e @ Error::Invalid(_)) => Err(e),
+        // それ以外は、サーバー側の拒否でもメモを失わないよう、待ち行列に残す
+        Err(e) => {
             ctx.queue.push(Job::WriteNote(note))?;
             start_worker(&ctx);
-            println!("omnigraph-server に届かないので待ち行列に保存しました");
+            match e {
+                Error::Transient(_) => println!("omnigraph-server に届かないので待ち行列に保存しました"),
+                _ => println!("書き込めなかったので待ち行列に保存しました: {e}"),
+            }
             Ok(())
         }
-        Err(e) => Err(e),
     }
 }
 

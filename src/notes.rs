@@ -42,13 +42,52 @@ fn exists(og: &Omnigraph, node: &str, key: &str, value: &str) -> Result<bool, Er
     Ok(!og.query(BRANCH, &q, json!({ "v": value }))?.is_empty())
 }
 
+/// slug の探索の結果。
+enum Slot {
+    /// 空いている slug
+    Free(String),
+    /// 同じ `created` と本文のノートがもう書かれている (再実行)
+    Done(Written),
+}
+
+/// 同じ slug のノートの `created` と本文。なければ `None`。
+fn existing(og: &Omnigraph, node: &str, slug: &str) -> Result<Option<(String, String)>, Error> {
+    let q = format!(
+        "query q($v: String) {{ match {{ $n: {node} {{ slug: $v }} }} return {{ $n.created as created, $n.body as body }} }}"
+    );
+    let rows = og.query(BRANCH, &q, json!({ "v": slug }))?;
+    Ok(rows.first().map(|r| {
+        let text = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        (text("created"), text("body"))
+    }))
+}
+
+/// `2026-11-20T01:00:00.000Z` / `2026-11-20T01:00:00` の両方の形を UTC の日時として読む。
+fn parse_created(s: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(s.trim_end_matches('Z'), "%Y-%m-%dT%H:%M:%S%.f").ok()
+}
+
 /// Fleeting と Literature のどちらにもない slug まで、1 秒ずつ進める。
-fn free_slug(og: &Omnigraph, created: NaiveDateTime) -> Result<String, Error> {
-    let mut t = created;
+/// 進める途中で、同じ `created` と本文のノートに当たったら、書き込み済みとして返す。
+/// サーバーが書いたあとに Transient を返した書き込みを待ち行列から再実行しても、重複しないため。
+/// `created` はサーバーが `Z` なしで返し、小数部が 0 なら小数部も省くので、文字列ではなく日時にして比べる。
+fn find_slot(og: &Omnigraph, note: &NewNote, created_iso: &str) -> Result<Slot, Error> {
+    let want = parse_created(created_iso);
+    let mut t = note.created.naive_local();
     loop {
         let slug = note_slug(t);
-        if !exists(og, "Fleeting", "slug", &slug)? && !exists(og, "Literature", "slug", &slug)? {
-            return Ok(slug);
+        let mut taken = false;
+        for (node, kind) in [("Fleeting", NoteKind::Fleeting), ("Literature", NoteKind::Literature)] {
+            if let Some((created, body)) = existing(og, node, &slug)? {
+                let same_time = want.is_some() && parse_created(&created) == want;
+                if same_time && body == note.body {
+                    return Ok(Slot::Done(Written { slug, kind }));
+                }
+                taken = true;
+            }
+        }
+        if !taken {
+            return Ok(Slot::Free(slug));
         }
         t += Duration::seconds(1);
     }
@@ -56,7 +95,7 @@ fn free_slug(og: &Omnigraph, created: NaiveDateTime) -> Result<String, Error> {
 
 /// 出典の指定から、Cites の宛先の Source の ID と、新しく作る Source の行 (あれば) を決める。
 fn resolve_source(og: &Omnigraph, raw: &str) -> Result<(String, Option<Value>), Error> {
-    let not_registered = || Error::Permanent(format!("出典 '{raw}' は登録されていません"));
+    let not_registered = || Error::Invalid(format!("出典 '{raw}' は登録されていません"));
     match SourceRef::parse(raw) {
         SourceRef::Slug(slug) => {
             // slug が "" の仮の Source に当たらないよう、空の指定は登録なしとして扱う
@@ -91,15 +130,18 @@ fn resolve_source(og: &Omnigraph, raw: &str) -> Result<(String, Option<Value>), 
 /// ノートを 1 件書く。出典なしは Fleeting、出典ありは Literature と Cites。
 pub fn write_note(og: &Omnigraph, note: &NewNote) -> Result<Written, Error> {
     if note.body.trim().is_empty() {
-        return Err(Error::Permanent("本文が空です".to_string()));
+        return Err(Error::Invalid("本文が空です".to_string()));
     }
     // 出典の確認を先にして、登録されていない出典なら何も書かない
     let source = match &note.source {
         Some(raw) => Some(resolve_source(og, raw)?),
         None => None,
     };
-    let slug = free_slug(og, note.created.naive_local())?;
     let created = note.created.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let slug = match find_slot(og, note, &created)? {
+        Slot::Free(slug) => slug,
+        Slot::Done(written) => return Ok(written),
+    };
 
     let mut lines = Vec::new();
     let kind = match source {

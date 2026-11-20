@@ -1,3 +1,5 @@
+mod common;
+
 use assert_cmd::Command;
 
 #[test]
@@ -67,4 +69,30 @@ fn no_body_shows_tui_notice() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("TUI は計画 3 で作ります"), "stdout: {stdout}");
+}
+
+#[test]
+fn server_rejection_still_queues_the_note() {
+    // サーバーは生きているが、グラフ名が違うので拒否される (Permanent)。メモは失わず待ち行列に残る
+    let server = common::TestServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = zl(dir.path());
+    std::fs::write(
+        dir.path().join("config.toml"),
+        format!("[omnigraph]\nserver = \"{}\"\ngraph = \"nosuchgraph\"\n", server.config().omnigraph.server),
+    )
+    .unwrap();
+    let output = cmd.arg("メモ").output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("書き込めなかったので待ち行列に保存しました: "), "stdout: {stdout}");
+    assert_eq!(pending(dir.path()).len(), 1);
+}
+
+#[test]
+fn invalid_source_is_not_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl(dir.path()).args(["-s", "", "メモ"]).output().unwrap();
+    assert!(!output.status.success());
+    assert!(pending(dir.path()).is_empty());
 }
