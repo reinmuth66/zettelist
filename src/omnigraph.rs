@@ -36,6 +36,16 @@ impl Omnigraph {
         Ok(Omnigraph { operator_config, state_dir: state_dir.to_path_buf(), home: None })
     }
 
+    /// 状態のディレクトリ (`operator.yaml` を書いた場所)。
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
+    /// 書き込みの排他に使うロックファイル。`Paths::write_lock` と同じ `state_dir/write.lock`。
+    pub fn write_lock(&self) -> PathBuf {
+        self.state_dir.join("write.lock")
+    }
+
     /// omnigraph に渡す `OMNIGRAPH_HOME` を指定する (テスト用)。
     pub fn with_home(mut self, home: &Path) -> Omnigraph {
         self.home = Some(home.to_path_buf());

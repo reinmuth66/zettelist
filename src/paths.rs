@@ -8,7 +8,7 @@ pub struct Paths {
     /// 設定ファイル。`ZETTELIST_CONFIG` があればそのパス、なければ `~/.config/zettelist/config.toml`
     pub config: PathBuf,
     /// 状態のディレクトリ。`ZETTELIST_STATE_DIR` があればそれ、なければ `~/.local/share/zettelist`。
-    /// 下に `queue/pending/`、`queue/failed/`、`worker.lock`、`worker.log`、`operator.yaml`、`review.json` を置く
+    /// 下に `queue/pending/`、`queue/failed/`、`worker.lock`、`worker.log`、`write.lock`、`operator.yaml`、`review.json` を置く
     pub state: PathBuf,
 }
 
@@ -52,4 +52,19 @@ impl Paths {
     pub fn review_lock(&self) -> PathBuf {
         self.state.join("review.lock")
     }
+    /// `notes::write_note` と `notes::promote` が slug の探索から load まで持つロック。
+    /// `Omnigraph::write_lock` (`state_dir/write.lock`) と同じ場所
+    pub fn write_lock(&self) -> PathBuf {
+        self.state.join("write.lock")
+    }
+}
+
+/// ロックファイルを開いて、排他ロックを取る (ほかが持っていれば待つ)。
+/// ロックはファイルを閉じる (返した `File` を落とす) と外れる。
+pub fn lock_file(path: &std::path::Path) -> Result<std::fs::File, Error> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let io = |e: std::io::Error| Error::Permanent(format!("{name} を取れません ({}): {e}", path.display()));
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(io)?;
+    file.lock().map_err(io)?;
+    Ok(file)
 }

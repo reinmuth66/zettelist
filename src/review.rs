@@ -11,7 +11,7 @@ use crate::queue::{Job, Queue};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
@@ -179,10 +179,7 @@ fn delete_from_review(og: &Omnigraph, p: &Proposal) -> Result<(), Error> {
 /// `apply` と、worker が review に提案を書く間 (`propose_for`) が同じロックを使い、
 /// 提案が apply の途中で review に入って未判断のまま merge されるのを防ぐ。
 pub fn lock_review(path: &Path) -> Result<File, Error> {
-    let io = |e: std::io::Error| Error::Permanent(format!("review.lock を取れません ({}): {e}", path.display()));
-    let file = OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(io)?;
-    file.lock().map_err(io)?;
-    Ok(file)
+    crate::paths::lock_file(path)
 }
 
 /// main にある Links と Includes の鍵

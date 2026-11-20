@@ -205,6 +205,39 @@ fn replaying_a_note_with_milliseconds_does_not_duplicate() {
     assert_eq!(count(&og, "Fleeting"), 1);
 }
 
+#[test]
+fn concurrent_writes_in_the_same_second_get_distinct_slugs() {
+    let s = TestServer::start();
+    // 別のクライアント (別プロセスの zl や worker の再実行) として、同じ状態ディレクトリを指す
+    let og_a = s.og();
+    let og_b = s.og();
+    // 競り合いは運なので、秒を変えて数回繰り返す
+    for round in 0..3u32 {
+        let created = Local.with_ymd_and_hms(2026, 11, 20, 10, round, 0).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let (a, b) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                barrier.wait();
+                write_note(&og_a, &note(&format!("本文 A {round}"), None, None, created)).unwrap()
+            });
+            let b = scope.spawn(|| {
+                barrier.wait();
+                write_note(&og_b, &note(&format!("本文 B {round}"), None, None, created)).unwrap()
+            });
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_ne!(a.slug, b.slug, "round {round}");
+    }
+    let rows = og_a
+        .query("main", "query q() { match { $f: Fleeting } return { $f.body as body } }", json!({}))
+        .unwrap();
+    let mut bodies: Vec<String> = rows.iter().map(|r| r["body"].as_str().unwrap().to_string()).collect();
+    bodies.sort();
+    let mut want: Vec<String> = (0..3).flat_map(|r| [format!("本文 A {r}"), format!("本文 B {r}")]).collect();
+    want.sort();
+    assert_eq!(bodies, want);
+}
+
 fn at(h: u32, m: u32) -> DateTime<Local> {
     Local.with_ymd_and_hms(2026, 11, 20, h, m, 0).unwrap()
 }

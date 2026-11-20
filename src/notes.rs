@@ -20,6 +20,7 @@ pub struct NewNote {
 use crate::embed::similarity;
 use crate::error::Error;
 use crate::omnigraph::Omnigraph;
+use crate::paths::lock_file;
 use crate::source_ref::SourceRef;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use serde_json::{json, Map, Value};
@@ -139,6 +140,9 @@ pub fn write_note(og: &Omnigraph, note: &NewNote) -> Result<Written, Error> {
         None => None,
     };
     let created = note.created.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    // load は merge (同じ slug なら上書き) なので、空き slug の探索から load まで排他にする。
+    // 同じ秒に書く別の zl や worker の再実行が、同じ slug を選んで先のノートを消さないため。
+    let _lock = lock_file(&og.write_lock())?;
     let slug = match find_slot(og, note, &created)? {
         Slot::Free(slug) => slug,
         Slot::Done(written) => return Ok(written),
@@ -247,7 +251,11 @@ pub fn inbox(og: &Omnigraph) -> Result<Vec<InboxItem>, Error> {
 }
 
 /// 元のノートから Permanent を 1 件作り、DerivedFrom / DerivedFromLit を同じ load で張る。
-/// Permanent の slug を返す。成功後に、呼ぶ側が `Job::Promote { slug }` を積む。
+/// Permanent の slug を返す。
+///
+/// 呼ぶ側は、成功後に `Job::Promote { slug }` を待ち行列に積み、`worker::spawn_worker` を呼ぶこと
+/// (この関数は積みも worker の起動もしない)。
+/// slug の探索から load までは `write.lock` を持つ (`write_note` と同じ)。
 pub fn promote(
     og: &Omnigraph,
     from: &[(NoteKind, String)],
@@ -269,6 +277,8 @@ pub fn promote(
         return Err(Error::Invalid("Permanent は昇格元にできません".to_string()));
     }
 
+    // `write_note` と同じロックを、空き slug の探索から load まで持つ
+    let _lock = lock_file(&og.write_lock())?;
     let mut t = created.naive_local();
     let slug = loop {
         let slug = note_slug(t);
