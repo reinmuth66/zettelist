@@ -20,7 +20,7 @@ Zettelkasten on Omnigraph で、書いたものを片付けてグラフに入れ
 - 道具の名前は **zettelist**、コマンドは **`zl`**
 - 2026-11-19 に確認: crates.io、npm、PyPI、nixpkgs、GitHub のリポジトリ名に同名なし。GitHub のコード中の 157 件はすべて `GazetteList` の部分一致で無関係。`zl` というコマンドも手元と nixpkgs になし
 - 公開も視野に入れる。公開の前に商標 (USPTO、EUIPO) を確かめる (未確認)
-- リポジトリ名 (`zettelkasten-tui`) の変更は利用者が決める
+- リポジトリ名は `zettelist` (2026-11-20 に `zettelkasten-tui` から変更)
 
 ## 道具の分担
 
