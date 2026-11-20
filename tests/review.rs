@@ -333,3 +333,95 @@ fn apply_queues_backup() {
     let e = queue.next_ready(SystemTime::now() + Duration::from_secs(1)).unwrap().unwrap();
     assert_eq!(e.job, Job::Backup { message: "merge: links 1".to_string() });
 }
+
+/// 手順 2 の save のあとで止まった状態: X は未判断として reinsert にあり、review にもまだある。
+/// そのあとで X に判断が付いた。
+fn crashed_with_x_in_reinsert(s: &TestServer, remove_from_review: bool) -> (Omnigraph, Queue, String, String, Proposal) {
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let x = propose_link(&og, &a, &b, 0.9);
+    let path = state_path(s);
+    let mut st = ReviewState::load(&path).unwrap();
+    st.reinsert = vec![x.clone()];
+    st.save(&path).unwrap();
+    if remove_from_review {
+        og.mutate(
+            "review",
+            "query d($a: String, $b: String) { delete Links where @src = $a and @dst = $b }",
+            json!({"a": a, "b": b}),
+        )
+        .unwrap();
+    }
+    (og, queue, a, b, x)
+}
+
+#[test]
+fn adopted_after_crash_wins_over_stale_reinsert_still_in_review() {
+    let s = TestServer::start();
+    let (og, queue, a, b, x) = crashed_with_x_in_reinsert(&s, false);
+    save_decisions(&state_path(&s), vec![(&x, Decision::Adopt { reason: Some("あとから".into()) })]);
+
+    let summary = apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(summary.links, 1);
+    assert_eq!(links(&og, "main"), [(a, b, Some("あとから".to_string()))]);
+    assert!(list_proposals(&og).unwrap().is_empty());
+    assert_eq!(ReviewState::load(&state_path(&s)).unwrap(), ReviewState::default());
+}
+
+#[test]
+fn adopted_after_crash_is_restored_when_already_deleted_from_review() {
+    let s = TestServer::start();
+    let (og, queue, a, b, x) = crashed_with_x_in_reinsert(&s, true);
+    assert!(list_proposals(&og).unwrap().is_empty());
+    save_decisions(&state_path(&s), vec![(&x, Decision::Adopt { reason: Some("戻して採用".into()) })]);
+
+    let summary = apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(summary.links, 1);
+    // 元の類似度で書き戻され、理由も付く
+    assert_eq!(links(&og, "main"), [(a.clone(), b.clone(), Some("戻して採用".to_string()))]);
+    let rows = og
+        .query("main", "query q() { match { $a: Permanent $a $l:links $b } return { $l.similarity as sim } }", json!({}))
+        .unwrap();
+    assert!((rows[0]["sim"].as_f64().unwrap() - 0.9).abs() < 1e-3);
+    assert!(list_proposals(&og).unwrap().is_empty());
+}
+
+#[test]
+fn rejected_after_crash_is_neither_in_main_nor_back_in_review() {
+    for remove_from_review in [false, true] {
+        let s = TestServer::start();
+        let (og, queue, _a, _b, x) = crashed_with_x_in_reinsert(&s, remove_from_review);
+        save_decisions(&state_path(&s), vec![(&x, Decision::Reject)]);
+
+        apply(&og, &state_path(&s), &queue).unwrap();
+        assert!(links(&og, "main").is_empty());
+        assert!(list_proposals(&og).unwrap().is_empty(), "remove_from_review={remove_from_review}");
+        assert_eq!(ReviewState::load(&state_path(&s)).unwrap(), ReviewState::default());
+    }
+}
+
+#[test]
+fn apply_waits_while_review_lock_is_held() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let path = state_path(&s);
+    let lock_path = path.with_file_name("review.lock");
+    let done = AtomicBool::new(false);
+
+    let held = zettelist::review::lock_review(&lock_path).unwrap();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            apply(&og, &path, &queue).unwrap();
+            done.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(!done.load(Ordering::SeqCst), "ロックを持たれたまま apply が進んだ");
+        drop(held);
+        worker.join().unwrap();
+    });
+    assert!(done.load(Ordering::SeqCst));
+}

@@ -5,6 +5,7 @@ use crate::notes::{note_text, set_embedding, write_note, NoteKind};
 use crate::paths::Paths;
 use crate::propose::propose_for;
 use crate::queue::{Job, Queue};
+use crate::review::lock_review;
 use crate::Ctx;
 use serde_json::json;
 use std::fs::{self, File, OpenOptions};
@@ -32,6 +33,8 @@ pub fn execute(ctx: &Ctx, job: &Job) -> Result<(), Error> {
             if !embed_note(ctx, NoteKind::Permanent, slug)? {
                 return Ok(());
             }
+            // 提案を書く間だけ review.lock を持つ (埋め込みの間は持たない)。apply の途中なら待つ
+            let _lock = lock_review(&ctx.paths.review_lock())?;
             propose_for(&ctx.og, ctx.embedder.as_ref(), &ctx.config.link, slug).map(|_| ())
         }
         // Task 11 で backup::run に差し替える

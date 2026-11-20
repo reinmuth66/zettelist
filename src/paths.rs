@@ -48,4 +48,8 @@ impl Paths {
     pub fn review_json(&self) -> PathBuf {
         self.state.join("review.json")
     }
+    /// `review::apply` が review.json の隣に取るロックと同じ場所
+    pub fn review_lock(&self) -> PathBuf {
+        self.state.join("review.lock")
+    }
 }

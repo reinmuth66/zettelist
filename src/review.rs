@@ -11,6 +11,7 @@ use crate::queue::{Job, Queue};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
@@ -29,11 +30,15 @@ impl Proposal {
         }
     }
 
-    /// review に書く JSONL の行
-    fn line(&self) -> Value {
+    /// review に書く JSONL の行。`reason` は Links だけに付く。
+    fn line(&self, reason: Option<&str>) -> Value {
         match self {
             Proposal::Link { from, to, similarity } => {
-                json!({"edge":"Links","from":from,"to":to,"data":{"similarity":similarity}})
+                let mut data = json!({"similarity":similarity});
+                if let Some(r) = reason {
+                    data["reason"] = json!(r);
+                }
+                json!({"edge":"Links","from":from,"to":to,"data":data})
             }
             Proposal::Hub { hub, note } => json!({"edge":"Includes","from":hub,"to":note}),
         }
@@ -170,54 +175,89 @@ fn delete_from_review(og: &Omnigraph, p: &Proposal) -> Result<(), Error> {
     og.mutate(REVIEW, query, json!({"a": a, "b": b}))
 }
 
+/// `review.lock` を取る (ほかが持っていれば待つ)。ロックはファイルを閉じると外れる。
+/// `apply` と、worker が review に提案を書く間 (`propose_for`) が同じロックを使い、
+/// 提案が apply の途中で review に入って未判断のまま merge されるのを防ぐ。
+pub fn lock_review(path: &Path) -> Result<File, Error> {
+    let io = |e: std::io::Error| Error::Permanent(format!("review.lock を取れません ({}): {e}", path.display()));
+    let file = OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(io)?;
+    file.lock().map_err(io)?;
+    Ok(file)
+}
+
+/// main にある Links と Includes の鍵
+fn main_keys(og: &Omnigraph) -> Result<HashSet<String>, Error> {
+    let mut keys: HashSet<String> =
+        links_on(og, MAIN)?.into_iter().map(|(from, to, similarity)| Proposal::Link { from, to, similarity }.key()).collect();
+    keys.extend(includes_on(og, MAIN)?.into_iter().map(|(hub, note)| Proposal::Hub { hub, note }.key()));
+    Ok(keys)
+}
+
 /// 判断を main に反映する。何度呼んでも、途中から続きを終わらせる。
 pub fn apply(og: &Omnigraph, state_path: &Path, queue: &Queue) -> Result<Summary, Error> {
+    // worker が review に提案を書く間は待つ。apply の間は worker も書けない
+    let _lock = lock_review(&state_path.with_file_name("review.lock"))?;
+
     // 1. review を main に追いつかせる
     ensure_review(og)?;
 
-    // 2. 判断のない提案を、消す前に reinsert へ書く。前回の reinsert は鍵ごとに和を取って失わない
+    // 2. 判断のない提案を、消す前に reinsert へ書く。前回の reinsert は鍵ごとに和を取って失わない。
+    //    前回の途中で落ちたあとに判断が付いたものは、reinsert の古い「未判断」に負けない:
+    //    却下は reinsert から外し、採用は reinsert に残して (手順 3 と 6 では判断を優先し)、
+    //    review から消えていれば手順 4 で書き戻す
     let mut state = ReviewState::load(state_path)?;
     let proposals = list_proposals(og)?;
-    for p in &proposals {
-        let key = p.key();
-        if !state.decisions.contains_key(&key) && !state.reinsert.iter().any(|r| r.key() == key) {
-            state.reinsert.push(p.clone());
+    {
+        let ReviewState { decisions, reinsert } = &mut state;
+        reinsert.retain(|p| !matches!(decisions.get(&p.key()), Some(Decision::Reject)));
+        for p in &proposals {
+            let key = p.key();
+            if !decisions.contains_key(&key) && !reinsert.iter().any(|r| r.key() == key) {
+                reinsert.push(p.clone());
+            }
         }
     }
     state.save(state_path)?;
 
     let by_key: HashMap<String, &Proposal> = proposals.iter().map(|p| (p.key(), p)).collect();
+    let undecided: Vec<&Proposal> = state.reinsert.iter().filter(|p| !state.decisions.contains_key(&p.key())).collect();
 
-    // 3. 却下したものと reinsert のものを review から消す
+    // 3. 却下したものと、判断のない reinsert のものを review から消す
     for (key, d) in &state.decisions {
         if let (Decision::Reject, Some(p)) = (d, by_key.get(key)) {
             delete_from_review(og, p)?;
         }
     }
-    for p in &state.reinsert {
+    for p in &undecided {
         delete_from_review(og, p)?;
     }
 
-    // 4. 理由つきで採用したリンクを、理由を付けて書き直す (`@key` なので 1 本のまま)。
-    //    すでに merge 済みで提案に残っていないものは、main に理由まで入っているので書かない
-    let mut with_reason = Vec::new();
+    // 4. 採用したもののうち、理由つきのリンクは理由を付けて書き直す (`@key` なので 1 本のまま)。
+    //    前回の手順 3 で review から消えたまま採用されたもの (reinsert にだけ残る) は、元の類似度で書き戻す。
+    //    すでに merge 済み (main にある) ものは、理由まで main に入っているので書かない
+    let in_main = main_keys(og)?;
+    let mut writes = Vec::new();
     for (key, d) in &state.decisions {
-        if let (Decision::Adopt { reason: Some(reason) }, Some(Proposal::Link { from, to, similarity })) =
-            (d, by_key.get(key).copied())
-        {
-            if !reason.is_empty() {
-                with_reason.push(json!({"edge":"Links","from":from,"to":to,"data":{"reason":reason,"similarity":similarity}}));
+        let Decision::Adopt { reason } = d else { continue };
+        let reason = reason.as_deref().filter(|r| !r.is_empty());
+        if let Some(p) = by_key.get(key) {
+            if reason.is_some() {
+                writes.push(p.line(reason));
+            }
+        } else if !in_main.contains(key) {
+            if let Some(p) = state.reinsert.iter().find(|p| p.key() == *key) {
+                writes.push(p.line(reason));
             }
         }
     }
-    og.load(REVIEW, &with_reason)?;
+    og.load(REVIEW, &writes)?;
 
     // 5. main へ merge する
     og.statement(&format!("branch merge {REVIEW} into {MAIN}"))?;
 
     // 6. 未判断のものを review に書き戻す。判断は片付ける
     ensure_review(og)?;
-    let lines: Vec<Value> = state.reinsert.iter().map(Proposal::line).collect();
+    let lines: Vec<Value> = undecided.iter().map(|p| p.line(None)).collect();
     og.load(REVIEW, &lines)?;
     let adopted = |prefix: &str| {
         state.decisions.iter().filter(|(k, d)| k.starts_with(prefix) && matches!(d, Decision::Adopt { .. })).count()
