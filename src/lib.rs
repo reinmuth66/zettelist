@@ -4,6 +4,7 @@ pub mod error;
 pub mod notes;
 pub mod omnigraph;
 pub mod paths;
+pub mod propose;
 pub mod queue;
 pub mod source_ref;
 pub mod worker;
