@@ -1,6 +1,6 @@
 ---
 name: zettelist
-description: zl (zettelist) コマンドで Zettelkasten を操作する。メモを残す、inbox (未整理のメモ) を見る、メモを読む、似ているノートを探す、Permanent ノートへ昇格する、ノートを消す、リンクやハブの提案をレビューして採用・却下・マージする、失敗したジョブをやり直す、といった話が出たら、利用者が zl や zettelist と言わなくても、Zettelkasten、メモの整理、inbox、昇格、提案のレビューが話題の時点で必ずこの skill を使うこと。
+description: zl (zettelist) コマンドで Zettelkasten を操作する。メモを残す、inbox (未整理のメモ) を見る、メモを読む、似ているノートを探す、Permanent ノートへ昇格する、ノートを消す、リンクやハブの提案をレビューして採用・却下・マージする、失敗したジョブをやり直す、といった話が出たら、利用者が zl や zettelist と言わなくても、Zettelkasten、メモの整理、inbox、昇格、提案のレビューが話題の時点で必ずこの skill を使うこと。Zettelkasten のグラフを omnigraph の CLI で直接読み書きしようとしているときも、先にこの skill を読むこと (書き換えは zl を通す決まりがある)。
 ---
 
 # zettelist (zl)
@@ -15,11 +15,25 @@ Omnigraph 上の Zettelkasten をコマンドラインから操作する。サ�
 
 Permanent の題と本文は、昇格元の内容をまとめた案を作って利用者に見せ、了承を得てから `--title` `--body` に渡す。元のメモの写しでは、整理した意味がなくなる。
 
-## omnigraph を直接使わない
+## omnigraph との使い分け
 
-操作はすべて zl で行う。グラフの書き換え (`omnigraph load`、`mutate`、`branch merge`、`branch delete`) は、omnigraph で直接行わない。zl が守っている決まりを素通りするから。たとえば、slug の重なりの確認、出典と Cites の同時の書き込み、埋め込みと待ち行列、昇格済みの確認、レビューとの排他。採否の判断も zl の手元にあり、グラフにはない。
+グラフは Omnigraph の上にあるので、omnigraph の CLI でも読み書きできてしまう。迷ったら次の順で決める。
 
-zl にない読み取り (リンクをたどる、文字列での絞り込み、過去の版や commit の履歴、一度きりの集計) に限って、`omnigraph query` を使ってよい。inbox や近さのように zl に同じ読み取りがあるものは zl を使う (昇格済みを除く、近さへの変換としきい値、といった zl の決まりが omnigraph では再現されない)。同じ読み取りが繰り返し要るなら、zl に足すよう利用者に伝える。
+1. グラフが変わる操作は zl で行う
+2. zl にある読み取り (inbox、全文、似ているノート、提案の一覧) も zl で行う
+3. それ以外の読み取りに限って `omnigraph query` を使う
+
+**書き換えを zl に限る理由**: zl は書き込みのたびに、グラフだけでは守れない決まりを処理している。slug の重なりの確認、出典と Cites の同時の書き込み、埋め込みを待ち行列に積むこと、昇格済みのノートを弾くこと、レビューの適用との排他。omnigraph の `load`、`mutate`、`branch merge`、`branch delete` を直接使うと、これらが抜けて、グラフと zl の手元の状態が食い違う。たとえば `load --mode merge` は同じ slug のノートを黙って上書きする。採否の判断は zl の手元 (`review.json`) にあってグラフにはないので、review ブランチを omnigraph でマージすると、却下した提案まで main に入る。
+
+**zl にある読み取りも zl を使う理由**: zl は読み取りにも決まりを足している。inbox は昇格済みを除き、似ているノートは距離を近さに直してしきい値で切る。同じことを omnigraph のクエリで書くと、少しずつ結果がずれる。
+
+**zl にない読み取り**: リンクをたどる、文字列で絞り込む、過去の版や commit の履歴を見る、一度きりの集計をする、といったときは `omnigraph query` を使ってよい。接続先は zl が書いた operator 設定を使う。
+
+```
+omnigraph query --operator-config ~/.local/share/zettelist/operator.yaml --target zl --format json -e '<クエリ>'
+```
+
+状態のフォルダは、`ZETTELIST_STATE_DIR` が設定されていればそちらにある。同じ読み取りを何度も使うようなら、zl にオプションとして足すよう利用者に伝える。
 
 ## メモを書く
 
