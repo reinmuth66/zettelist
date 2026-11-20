@@ -4,7 +4,7 @@
 
 ## 最初に読むもの
 
-- 運用の決まりとスキーマの正本: `~/ghq/github.com/reinmuth66/zettelkasten/docs/superpowers/specs/2026-11-19-zettelkasten-design.md`。ノートの種類、slug、出典、検索、保存はそこに従う。ただし「この文書で変えること」に挙げた点は、この文書が優先する (運用文書の側も後で直す)
+- 運用の決まりとスキーマの正本: `~/ghq/github.com/reinmuth66/zettelkasten/docs/superpowers/specs/2026-11-19-zettelkasten-design.md`。ノートの種類、slug、出典、検索、保存はそこに従う。ただし「この文書で変えること」に挙げた点は、この文書が優先する (運用文書の側は 2026-11-20 に直した)
 - 引き継ぎ: `docs/superpowers/specs/2026-11-19-zettelkasten-tui-design.md`。Omnigraph について分かっていること、環境、利用者についてはそこを参照する
 - Omnigraph の使い方: `omnigraph skill export ~/.claude/skills/omnigraph --force` で、導入した CLI に合う agent skill を入れてから作業する
 
@@ -429,4 +429,4 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 ## 未確認事項
 
 1. 商標 (USPTO、EUIPO) の確認 (公開の前)
-2. 運用文書の側の修正 (この文書で変えたことを反映する)
+2. ~~運用文書の側の修正~~ (2026-11-20 に反映済み)
