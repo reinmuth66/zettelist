@@ -1,10 +1,10 @@
 mod common;
 
-use chrono::{DateTime, Local, TimeZone};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use common::TestServer;
 use serde_json::{json, Value};
 use zettelist::error::Error;
-use zettelist::notes::{write_note, NewNote, NoteKind};
+use zettelist::notes::{delete_notes, inbox, promote, write_note, InboxItem, NewNote, NoteKind};
 use zettelist::omnigraph::Omnigraph;
 
 fn note(body: &str, source: Option<&str>, locator: Option<&str>, created: DateTime<Local>) -> NewNote {
@@ -200,4 +200,180 @@ fn replaying_a_note_with_milliseconds_does_not_duplicate() {
     let b = write_note(&og, &n).unwrap();
     assert_eq!(a, b);
     assert_eq!(count(&og, "Fleeting"), 1);
+}
+
+fn at(h: u32, m: u32) -> DateTime<Local> {
+    Local.with_ymd_and_hms(2026, 11, 20, h, m, 0).unwrap()
+}
+
+fn permanents(og: &Omnigraph) -> Vec<serde_json::Map<String, Value>> {
+    og.query(
+        "main",
+        "query q() { match { $p: Permanent } return { $p.slug as slug, $p.title as title, $p.body as body } order { $p.slug } }",
+        json!({}),
+    )
+    .unwrap()
+}
+
+fn edge_count(og: &Omnigraph, edge: &str) -> usize {
+    og.export("main")
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["edge"] == edge)
+        .count()
+}
+
+#[test]
+fn inbox_lists_unprocessed_oldest_first() {
+    let s = TestServer::start();
+    let og = s.og();
+    // 書く順は created の順と違えておく
+    write_note(&og, &note("二番目", None, None, at(10, 5))).unwrap();
+    write_note(&og, &note("三番目", Some("978-4-480-06899-8"), None, at(10, 10))).unwrap();
+    write_note(&og, &note("一番目", None, None, at(10, 0))).unwrap();
+    let items = inbox(&og).unwrap();
+    let bodies: Vec<&str> = items.iter().map(|i| i.body.as_str()).collect();
+    assert_eq!(bodies, ["一番目", "二番目", "三番目"]);
+    assert_eq!(items[0].kind, NoteKind::Fleeting);
+    assert_eq!(items[2].kind, NoteKind::Literature);
+    assert_eq!(items[0].slug, "20261120100000");
+    assert_eq!(items[0].created, at(10, 0).with_timezone(&Utc));
+    assert_eq!(items[0].source_id, None);
+}
+
+#[test]
+fn inbox_shows_source_of_literature() {
+    let s = TestServer::start();
+    let og = s.og();
+    write_note(&og, &note("本の一節", Some("978-4-480-06899-8"), Some("p.42"), at_ten())).unwrap();
+    let items = inbox(&og).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].kind, NoteKind::Literature);
+    assert_eq!(items[0].source_id.as_deref(), Some("isbn:9784480068998"));
+    assert_eq!(items[0].locator.as_deref(), Some("p.42"));
+    // 仮の Source の slug は "" なので、出典の slug はなし
+    assert_eq!(items[0].source_slug, None);
+}
+
+#[test]
+fn inbox_shows_registered_source_slug_and_missing_locator() {
+    let s = TestServer::start();
+    let og = s.og();
+    og.load(
+        "main",
+        &[json!({"type":"Source","data":{"id":"isbn:1","slug":"tanaka-2024","title":"S","kind":"book","input":"x","provenance":"{}"}})],
+    )
+    .unwrap();
+    write_note(&og, &note("引用", Some("tanaka-2024"), None, at_ten())).unwrap();
+    let items = inbox(&og).unwrap();
+    assert_eq!(items[0].source_slug.as_deref(), Some("tanaka-2024"));
+    assert_eq!(items[0].source_id.as_deref(), Some("isbn:1"));
+    assert_eq!(items[0].locator, None);
+}
+
+#[test]
+fn promoted_notes_leave_inbox() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f = write_note(&og, &note("メモ", None, None, at(10, 0))).unwrap();
+    let l = write_note(&og, &note("引用", Some("978-4-480-06899-8"), None, at(10, 5))).unwrap();
+    write_note(&og, &note("残るメモ", None, None, at(10, 10))).unwrap();
+    let slug = promote(
+        &og,
+        &[(NoteKind::Fleeting, f.slug.clone()), (NoteKind::Literature, l.slug.clone())],
+        "考え",
+        "二つから生まれた考え",
+        at(11, 0),
+    )
+    .unwrap();
+    assert_eq!(slug, "20261120110000");
+    let items = inbox(&og).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].body, "残るメモ");
+    let p = permanents(&og);
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0]["slug"], slug.as_str());
+    assert_eq!(p[0]["title"], "考え");
+    assert_eq!(p[0]["body"], "二つから生まれた考え");
+    assert_eq!(edge_count(&og, "DerivedFrom"), 1);
+    assert_eq!(edge_count(&og, "DerivedFromLit"), 1);
+}
+
+#[test]
+fn promote_advances_slug_on_permanent_collision() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f = write_note(&og, &note("メモ", None, None, at(10, 0))).unwrap();
+    let from = [(NoteKind::Fleeting, f.slug)];
+    let a = promote(&og, &from, "一つ目", "本文一", at(11, 0)).unwrap();
+    let b = promote(&og, &from, "二つ目", "本文二", at(11, 0)).unwrap();
+    assert_eq!(a, "20261120110000");
+    assert_eq!(b, "20261120110001");
+    assert_eq!(permanents(&og).len(), 2);
+}
+
+#[test]
+fn promote_with_blank_body_writes_nothing() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f = write_note(&og, &note("メモ", None, None, at(10, 0))).unwrap();
+    let from = [(NoteKind::Fleeting, f.slug)];
+    for (title, body) in [("題", " \n"), (" ", "本文")] {
+        let e = promote(&og, &from, title, body, at(11, 0)).unwrap_err();
+        assert!(matches!(e, Error::Invalid(_)), "{e:?}");
+    }
+    let e = promote(&og, &[], "題", "本文", at(11, 0)).unwrap_err();
+    assert!(matches!(e, Error::Invalid(_)), "{e:?}");
+    assert_eq!(count(&og, "Permanent"), 0);
+    assert_eq!(inbox(&og).unwrap().len(), 1);
+}
+
+#[test]
+fn promote_rejects_permanent_in_from() {
+    let s = TestServer::start();
+    let og = s.og();
+    let e = promote(&og, &[(NoteKind::Permanent, "x".to_string())], "題", "本文", at(11, 0)).unwrap_err();
+    assert!(matches!(e, Error::Invalid(_)), "{e:?}");
+    assert_eq!(count(&og, "Permanent"), 0);
+}
+
+#[test]
+fn delete_removes_from_inbox() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f = write_note(&og, &note("メモ", None, None, at(10, 0))).unwrap();
+    let l = write_note(&og, &note("引用", Some("978-4-480-06899-8"), Some("p.1"), at(10, 5))).unwrap();
+    let keep = write_note(&og, &note("残す", None, None, at(10, 10))).unwrap();
+    delete_notes(&og, &[(NoteKind::Fleeting, f.slug), (NoteKind::Literature, l.slug)]).unwrap();
+    let items = inbox(&og).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].slug, keep.slug);
+    assert_eq!(count(&og, "Literature"), 0);
+    assert_eq!(edge_count(&og, "Cites"), 0);
+    // 出典は残る
+    assert_eq!(sources(&og).len(), 1);
+}
+
+#[test]
+fn delete_nothing_is_ok() {
+    let s = TestServer::start();
+    let og = s.og();
+    delete_notes(&og, &[]).unwrap();
+}
+
+#[test]
+fn is_old_after_30_days() {
+    let created = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+    let item = InboxItem {
+        kind: NoteKind::Fleeting,
+        slug: "s".to_string(),
+        body: "b".to_string(),
+        created,
+        source_slug: None,
+        source_id: None,
+        locator: None,
+    };
+    assert!(!item.is_old(created + chrono::Duration::days(30)));
+    assert!(item.is_old(created + chrono::Duration::days(30) + chrono::Duration::seconds(1)));
 }

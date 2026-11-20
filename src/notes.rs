@@ -20,8 +20,8 @@ pub struct NewNote {
 use crate::error::Error;
 use crate::omnigraph::Omnigraph;
 use crate::source_ref::SourceRef;
-use chrono::{Duration, NaiveDateTime};
-use serde_json::{json, Value};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
+use serde_json::{json, Map, Value};
 
 const BRANCH: &str = "main";
 
@@ -163,4 +163,137 @@ pub fn write_note(og: &Omnigraph, note: &NewNote) -> Result<Written, Error> {
     };
     og.load(BRANCH, &lines)?;
     Ok(Written { slug, kind })
+}
+
+impl NoteKind {
+    /// スキーマ上のノードの型名。クエリの型名はここからだけ作る。
+    fn node_type(self) -> &'static str {
+        match self {
+            NoteKind::Fleeting => "Fleeting",
+            NoteKind::Literature => "Literature",
+            NoteKind::Permanent => "Permanent",
+        }
+    }
+}
+
+/// inbox の 1 件。まだ Permanent に昇格していない Fleeting か Literature。
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboxItem {
+    pub kind: NoteKind,
+    pub slug: String,
+    pub body: String,
+    pub created: DateTime<Utc>,
+    /// Literature の出典が登録済みなら、その slug (仮の Source は slug が空なので `None`)
+    pub source_slug: Option<String>,
+    /// Literature の出典の ID
+    pub source_id: Option<String>,
+    /// Literature の引用箇所
+    pub locator: Option<String>,
+}
+
+impl InboxItem {
+    /// 作成から 30 日を超えていれば true (ちょうど 30 日は false)。
+    pub fn is_old(&self, now: DateTime<Utc>) -> bool {
+        now - self.created > Duration::days(30)
+    }
+}
+
+fn text(r: &Map<String, Value>, key: &str) -> Option<String> {
+    r.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from)
+}
+
+fn item_of(kind: NoteKind, r: &Map<String, Value>) -> Result<InboxItem, Error> {
+    let created = text(r, "created")
+        .and_then(|s| parse_created(&s))
+        .ok_or_else(|| Error::Permanent(format!("created を読めません: {r:?}")))?
+        .and_utc();
+    let slug = text(r, "slug").ok_or_else(|| Error::Permanent(format!("slug がありません: {r:?}")))?;
+    Ok(InboxItem {
+        kind,
+        slug,
+        body: r.get("body").and_then(Value::as_str).unwrap_or_default().to_string(),
+        created,
+        source_slug: text(r, "source_slug"),
+        source_id: text(r, "source_id"),
+        locator: text(r, "locator"),
+    })
+}
+
+/// 昇格していない (DerivedFrom / DerivedFromLit のない) Fleeting と Literature を、古い順に返す。
+pub fn inbox(og: &Omnigraph) -> Result<Vec<InboxItem>, Error> {
+    let fleeting = og.query(
+        BRANCH,
+        "query q() { match { $f: Fleeting not { $p: Permanent $p derivedFrom $f } } \
+         return { $f.slug as slug, $f.body as body, $f.created as created } }",
+        json!({}),
+    )?;
+    let literature = og.query(
+        BRANCH,
+        "query q() { match { $l: Literature $l $c:cites $s not { $p: Permanent $p derivedFromLit $l } } \
+         return { $l.slug as slug, $l.body as body, $l.created as created, \
+         $s.id as source_id, $s.slug as source_slug, $c.locator as locator } }",
+        json!({}),
+    )?;
+    let mut items = Vec::new();
+    for r in &fleeting {
+        items.push(item_of(NoteKind::Fleeting, r)?);
+    }
+    for r in &literature {
+        items.push(item_of(NoteKind::Literature, r)?);
+    }
+    items.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.slug.cmp(&b.slug)));
+    Ok(items)
+}
+
+/// 元のノートから Permanent を 1 件作り、DerivedFrom / DerivedFromLit を同じ load で張る。
+/// Permanent の slug を返す。成功後に、呼ぶ側が `Job::Promote { slug }` を積む。
+pub fn promote(
+    og: &Omnigraph,
+    from: &[(NoteKind, String)],
+    title: &str,
+    body: &str,
+    created: DateTime<chrono::Local>,
+) -> Result<String, Error> {
+    if title.trim().is_empty() {
+        return Err(Error::Invalid("題名が空です".to_string()));
+    }
+    if body.trim().is_empty() {
+        return Err(Error::Invalid("本文が空です".to_string()));
+    }
+    if from.is_empty() {
+        return Err(Error::Invalid("昇格元のノートがありません".to_string()));
+    }
+    // Permanent から Permanent は DerivedFrom で結べない
+    if from.iter().any(|(kind, _)| *kind == NoteKind::Permanent) {
+        return Err(Error::Invalid("Permanent は昇格元にできません".to_string()));
+    }
+
+    let mut t = created.naive_local();
+    let slug = loop {
+        let slug = note_slug(t);
+        if !exists(og, "Permanent", "slug", &slug)? {
+            break slug;
+        }
+        t += Duration::seconds(1);
+    };
+
+    let created = created.with_timezone(&Utc).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let mut lines = vec![json!({"type":"Permanent","data":{"slug":slug,"title":title,"body":body,"created":created}})];
+    for (kind, from_slug) in from {
+        let edge = if *kind == NoteKind::Literature { "DerivedFromLit" } else { "DerivedFrom" };
+        lines.push(json!({"edge":edge,"from":slug,"to":from_slug}));
+    }
+    og.load(BRANCH, &lines)?;
+    Ok(slug)
+}
+
+/// ノートを消す。ノードを消せば、つながるエッジ (Literature の Cites など) も一緒に消える。
+/// 途中で失敗しても、同じ指定で再実行できる (存在しないノートの削除は何もしない)。
+pub fn delete_notes(og: &Omnigraph, notes: &[(NoteKind, String)]) -> Result<(), Error> {
+    for (kind, slug) in notes {
+        // delete は insert と同じクエリに混ぜられないので、1 件ずつ別の mutate にする
+        let q = format!("query d($s: String) {{ delete {} where slug = $s }}", kind.node_type());
+        og.mutate(BRANCH, &q, json!({ "s": slug }))?;
+    }
+    Ok(())
 }
