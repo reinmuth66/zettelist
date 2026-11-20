@@ -7,6 +7,7 @@ use crate::backup::{self, Outcome};
 use crate::error::Error;
 use crate::notes::{get_embedding, inbox, nearest, show_note, write_note, NewNote, Near, NoteKind};
 use crate::queue::Job;
+use crate::review::{apply, decide, list_proposals, Decision, Proposal, ReviewState};
 use crate::worker::{reembed_all, run_worker, run_worker_once, spawn_worker};
 use crate::Ctx;
 use chrono::{DateTime, Local, SecondsFormat, Utc};
@@ -19,7 +20,7 @@ use std::process::ExitCode;
 /// Zettelkasten on Omnigraph の書き込みと整理の道具
 #[derive(Parser)]
 #[command(name = "zettelist", version)]
-#[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete"]).multiple(false))]
+#[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "adopt", "reject", "undecide", "merge"]).multiple(false))]
 #[command(group = ArgGroup::new("promote_body").args(["promote_body_text", "promote_body_file"]).multiple(false))]
 struct Cli {
     /// 出典 (ISBN、DOI、arXiv ID、URL、または登録済みのスラッグ)
@@ -90,6 +91,32 @@ struct Cli {
     #[arg(long, value_name = "スラッグ,...")]
     delete: Option<String>,
 
+    /// 提案を採用する (キーは `--review` に出る)
+    #[arg(long, value_name = "キー")]
+    adopt: Option<String>,
+
+    /// 採用するリンクの理由
+    #[arg(
+        long,
+        value_name = "理由",
+        requires = "adopt",
+        // 別の操作が選ばれていると `requires` だけでは弾けないので、並べて排他にする
+        conflicts_with_all = ["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "reject", "undecide", "merge"]
+    )]
+    reason: Option<String>,
+
+    /// 提案を却下する
+    #[arg(long, value_name = "キー")]
+    reject: Option<String>,
+
+    /// 提案への判断を外す
+    #[arg(long, value_name = "キー")]
+    undecide: Option<String>,
+
+    /// 採用した提案を main に取り込み、却下したものを捨てる。`--yes` が要る
+    #[arg(long)]
+    merge: bool,
+
     /// 消す・捨てる・マージするを確かめた上で行う
     #[arg(long)]
     yes: bool,
@@ -113,6 +140,10 @@ enum Action {
     Review,
     Promote { slugs: String, title: String, body: BodySource },
     Delete { slugs: String, yes: bool },
+    Adopt { key: String, reason: Option<String> },
+    Reject(String),
+    Undecide(String),
+    Merge { yes: bool },
     Tui,
 }
 
@@ -141,6 +172,14 @@ impl Cli {
             Action::Promote { slugs, title: self.title.unwrap_or_default(), body }
         } else if let Some(slugs) = self.delete {
             Action::Delete { slugs, yes: self.yes }
+        } else if let Some(key) = self.adopt {
+            Action::Adopt { key, reason: self.reason }
+        } else if let Some(key) = self.reject {
+            Action::Reject(key)
+        } else if let Some(key) = self.undecide {
+            Action::Undecide(key)
+        } else if self.merge {
+            Action::Merge { yes: self.yes }
         } else if let Some(body) = self.body {
             Action::Write(NewNote { body, source: self.source, locator: self.locator, created: Local::now() })
         } else {
@@ -227,8 +266,11 @@ fn dispatch(json: bool, action: Action) -> Result<(), Error> {
         Action::Similar(slug) => similar(json, &slug),
         Action::Promote { slugs, title, body } => promote_notes(json, &slugs, &title, body),
         Action::Delete { slugs, yes } => delete_notes_cmd(json, &slugs, yes),
-        // 次のタスクで実装する
-        Action::Review => Err(Error::Permanent("未実装".to_string())),
+        Action::Review => review_list(json),
+        Action::Adopt { key, reason } => decide_cmd(json, &key, Some(Decision::Adopt { reason }), "採用しました"),
+        Action::Reject(key) => decide_cmd(json, &key, Some(Decision::Reject), "却下しました"),
+        Action::Undecide(key) => decide_cmd(json, &key, None, "判断を外しました"),
+        Action::Merge { yes } => merge(json, yes),
     }
 }
 
@@ -372,6 +414,85 @@ fn delete_notes_cmd(json: bool, slugs: &str, yes: bool) -> Result<(), Error> {
     let notes = resolve_kinds(&ctx, &slugs)?;
     crate::notes::delete_notes(&ctx.og, &notes)?;
     output(json, json!({"ok": true}), &format!("{} 件消しました", notes.len()));
+    Ok(())
+}
+
+/// `--review`
+fn review_list(json: bool) -> Result<(), Error> {
+    let ctx = Ctx::from_env()?;
+    let proposals = list_proposals(&ctx.og)?;
+    let state = ReviewState::load(&ctx.paths.review_json())?;
+    let mark = |d: Option<&Decision>| match d {
+        Some(Decision::Adopt { .. }) => "採用",
+        Some(Decision::Reject) => "却下",
+        None => "未判断",
+    };
+    let mut values = Vec::new();
+    let mut lines = Vec::new();
+    for p in &proposals {
+        let key = p.key();
+        let decision = state.decisions.get(&key);
+        let (name, reason) = match decision {
+            Some(Decision::Adopt { reason }) => (json!("adopt"), json!(reason)),
+            Some(Decision::Reject) => (json!("reject"), json!(null)),
+            None => (json!(null), json!(null)),
+        };
+        let mut line = format!("{key}  {}", mark(decision));
+        match p {
+            Proposal::Link { from, to, similarity } => {
+                values.push(json!({
+                    "key": key, "type": "link", "from": from, "to": to,
+                    "similarity": rounded(*similarity), "decision": name, "reason": reason,
+                }));
+                line = format!("{line}  {similarity:.2}");
+            }
+            Proposal::Hub { hub, note } => {
+                values.push(json!({
+                    "key": key, "type": "hub", "hub": hub, "note": note,
+                    "decision": name, "reason": reason,
+                }));
+            }
+        }
+        if let Some(Decision::Adopt { reason: Some(r) }) = decision {
+            line = format!("{line}  {r}");
+        }
+        lines.push(line);
+    }
+    let human = if lines.is_empty() { "提案はありません".to_string() } else { lines.join("\n") };
+    output(json, json!(values), &human);
+    Ok(())
+}
+
+/// `--adopt <key> [--reason <理由>]`、`--reject <key>`、`--undecide <key>`
+fn decide_cmd(json: bool, key: &str, decision: Option<Decision>, done: &str) -> Result<(), Error> {
+    let ctx = Ctx::from_env()?;
+    // 空の理由は付けない
+    let decision = match decision {
+        Some(Decision::Adopt { reason }) => {
+            Some(Decision::Adopt { reason: reason.map(|r| r.trim().to_string()).filter(|r| !r.is_empty()) })
+        }
+        other => other,
+    };
+    // decide が review.lock を自分で取る。ここでは持たない
+    decide(&ctx.og, &ctx.paths.review_json(), &ctx.paths.review_lock(), key, decision)?;
+    output(json, json!({"ok": true}), &format!("{done} {key}"));
+    Ok(())
+}
+
+/// `--merge --yes`
+fn merge(json: bool, yes: bool) -> Result<(), Error> {
+    if !yes {
+        return Err(Error::Invalid("マージするには --yes が要ります".to_string()));
+    }
+    let ctx = Ctx::from_env()?;
+    // apply が review.lock を自分で取る。ここでは持たない
+    let summary = apply(&ctx.og, &ctx.paths.review_json(), &ctx.queue)?;
+    start_worker(&ctx);
+    output(
+        json,
+        json!({"links": summary.links, "hubs": summary.hubs}),
+        &format!("マージしました (リンク {} 本、ハブ {} 件)", summary.links, summary.hubs),
+    );
     Ok(())
 }
 

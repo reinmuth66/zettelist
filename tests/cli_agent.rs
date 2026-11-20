@@ -599,3 +599,217 @@ fn promote_already_promoted_is_invalid() {
     assert_eq!(count, 1);
     assert_eq!(pending(dir.path()).len(), 1);
 }
+
+// ---- レビュー (--review、--adopt、--reject、--undecide、--merge) ----
+
+use serde_json::json;
+use zettelist::omnigraph::Omnigraph;
+use zettelist::propose::ensure_review;
+
+/// 昇格元の Fleeting を 1 件書いて Permanent を作る (埋め込みは付けない)。
+fn make_permanent(og: &Omnigraph, title: &str, minute: i64) -> String {
+    let base = Local::now() - Duration::hours(3) + Duration::minutes(minute);
+    let f = write_note(og, &new_note(&format!("{title} の元"), None, base)).unwrap();
+    promote(og, &[(NoteKind::Fleeting, f.slug)], title, &format!("{title} の本文"), base + Duration::minutes(1)).unwrap()
+}
+
+/// review に Links の提案を書く。
+fn propose_link(og: &Omnigraph, from: &str, to: &str, similarity: f32) {
+    ensure_review(og).unwrap();
+    og.load("review", &[json!({"edge":"Links","from":from,"to":to,"data":{"similarity":similarity}})]).unwrap();
+}
+
+/// 類似度の違う Links の提案を 2 本 (a->b 0.9、a->c 0.8) 作り、(a, b, c) を返す。
+fn two_link_proposals(og: &Omnigraph) -> (String, String, String) {
+    let a = make_permanent(og, "A", 0);
+    let b = make_permanent(og, "B", 10);
+    let c = make_permanent(og, "C", 20);
+    propose_link(og, &a, &b, 0.9);
+    propose_link(og, &a, &c, 0.8);
+    (a, b, c)
+}
+
+fn main_links(og: &Omnigraph) -> Vec<(String, String, Option<String>)> {
+    let rows = og
+        .query(
+            "main",
+            "query q() { match { $a: Permanent $a $l:links $b } return { $a.slug as src, $b.slug as dst, $l.reason as reason } }",
+            json!({}),
+        )
+        .unwrap();
+    let mut v: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r["src"].as_str().unwrap().to_string(),
+                r["dst"].as_str().unwrap().to_string(),
+                r.get("reason").and_then(|x| x.as_str()).map(String::from),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+fn review_json_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("state/review.json")
+}
+
+#[test]
+fn review_json_lists_with_decisions() {
+    let server = TestServer::start();
+    let og = server.og();
+    let (a, b, c) = two_link_proposals(&og);
+    let dir = tempfile::tempdir().unwrap();
+    let key_ab = format!("link:{a}:{b}");
+    json_out(&zl_on(&server, dir.path(), 0.0).args(["--adopt", &key_ab, "--json"]).output().unwrap());
+    let out = json_out(&zl_on(&server, dir.path(), 0.0).args(["--review", "--json"]).output().unwrap());
+    let items = out.as_array().unwrap();
+    assert_eq!(items.len(), 2, "{out}");
+    assert_eq!(items[0]["key"], key_ab);
+    assert_eq!(items[0]["type"], "link");
+    assert_eq!(items[0]["from"], a);
+    assert_eq!(items[0]["to"], b);
+    assert!((items[0]["similarity"].as_f64().unwrap() - 0.9).abs() < 1e-3, "{out}");
+    assert_eq!(items[0]["decision"], "adopt");
+    assert!(items[0]["reason"].is_null());
+    assert_eq!(items[1]["key"], format!("link:{a}:{c}"));
+    assert!(items[1]["decision"].is_null(), "{out}");
+    assert!(items[1]["reason"].is_null());
+}
+
+#[test]
+fn review_json_shows_adopt_reason() {
+    let server = TestServer::start();
+    let og = server.og();
+    let (a, b, _c) = two_link_proposals(&og);
+    let dir = tempfile::tempdir().unwrap();
+    let key_ab = format!("link:{a}:{b}");
+    json_out(&zl_on(&server, dir.path(), 0.0).args(["--adopt", &key_ab, "--reason", "理由", "--json"]).output().unwrap());
+    let out = json_out(&zl_on(&server, dir.path(), 0.0).args(["--review", "--json"]).output().unwrap());
+    assert_eq!(out[0]["decision"], "adopt");
+    assert_eq!(out[0]["reason"], "理由");
+    let human = zl_on(&server, dir.path(), 0.0).arg("--review").output().unwrap();
+    assert!(human.status.success());
+    assert!(String::from_utf8(human.stdout).unwrap().contains(&key_ab));
+}
+
+#[test]
+fn review_empty_is_empty_array() {
+    let server = TestServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let out = json_out(&zl_on(&server, dir.path(), 0.0).args(["--review", "--json"]).output().unwrap());
+    assert_eq!(out, json!([]));
+}
+
+#[test]
+fn adopt_with_reason_then_merge() {
+    let server = TestServer::start();
+    let og = server.og();
+    let (a, b, c) = two_link_proposals(&og);
+    let dir = tempfile::tempdir().unwrap();
+    let key_ab = format!("link:{a}:{b}");
+    let ok = json_out(
+        &zl_on(&server, dir.path(), 0.0).args(["--adopt", &key_ab, "--reason", "同じ話", "--json"]).output().unwrap(),
+    );
+    assert_eq!(ok, json!({"ok": true}));
+    let out = json_out(&zl_on(&server, dir.path(), 0.0).args(["--merge", "--yes", "--json"]).output().unwrap());
+    assert_eq!(out, json!({"links": 1, "hubs": 0}));
+    assert_eq!(main_links(&og), vec![(a.clone(), b.clone(), Some("同じ話".to_string()))]);
+    let jobs = pending(dir.path());
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert!(jobs[0]["job"]["Backup"]["message"].as_str().unwrap().contains("links 1"), "{jobs:?}");
+    // 未判断の a->c は review に残る
+    let out = json_out(&zl_on(&server, dir.path(), 0.0).args(["--review", "--json"]).output().unwrap());
+    assert_eq!(out.as_array().unwrap().len(), 1, "{out}");
+    assert_eq!(out[0]["key"], format!("link:{a}:{c}"));
+    assert!(out[0]["decision"].is_null());
+}
+
+#[test]
+fn reject_then_merge_drops() {
+    let server = TestServer::start();
+    let og = server.og();
+    let (a, b, c) = two_link_proposals(&og);
+    let dir = tempfile::tempdir().unwrap();
+    let key_ab = format!("link:{a}:{b}");
+    let ok = json_out(&zl_on(&server, dir.path(), 0.0).args(["--reject", &key_ab, "--json"]).output().unwrap());
+    assert_eq!(ok, json!({"ok": true}));
+    let out = json_out(&zl_on(&server, dir.path(), 0.0).args(["--merge", "--yes", "--json"]).output().unwrap());
+    assert_eq!(out, json!({"links": 0, "hubs": 0}));
+    assert!(main_links(&og).is_empty());
+    let out = json_out(&zl_on(&server, dir.path(), 0.0).args(["--review", "--json"]).output().unwrap());
+    let keys: Vec<_> = out.as_array().unwrap().iter().map(|i| i["key"].as_str().unwrap().to_string()).collect();
+    assert_eq!(keys, vec![format!("link:{a}:{c}")]);
+}
+
+#[test]
+fn undecide_clears() {
+    let server = TestServer::start();
+    let og = server.og();
+    let (a, b, _c) = two_link_proposals(&og);
+    let dir = tempfile::tempdir().unwrap();
+    let key_ab = format!("link:{a}:{b}");
+    json_out(&zl_on(&server, dir.path(), 0.0).args(["--adopt", &key_ab, "--json"]).output().unwrap());
+    let ok = json_out(&zl_on(&server, dir.path(), 0.0).args(["--undecide", &key_ab, "--json"]).output().unwrap());
+    assert_eq!(ok, json!({"ok": true}));
+    let out = json_out(&zl_on(&server, dir.path(), 0.0).args(["--review", "--json"]).output().unwrap());
+    assert!(out[0]["decision"].is_null(), "{out}");
+    // 判断がないものを外してもエラーにしない
+    json_out(&zl_on(&server, dir.path(), 0.0).args(["--undecide", &key_ab, "--json"]).output().unwrap());
+}
+
+#[test]
+fn unknown_key_is_invalid() {
+    let server = TestServer::start();
+    let og = server.og();
+    let (a, b, _c) = two_link_proposals(&og);
+    let dir = tempfile::tempdir().unwrap();
+    let key_ab = format!("link:{a}:{b}");
+    json_out(&zl_on(&server, dir.path(), 0.0).args(["--adopt", &key_ab, "--json"]).output().unwrap());
+    let before = std::fs::read(review_json_path(dir.path())).unwrap();
+    for flag in ["--adopt", "--reject", "--undecide"] {
+        let output = zl_on(&server, dir.path(), 0.0).args([flag, "link:x:y", "--json"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{flag}: {}", String::from_utf8_lossy(&output.stderr));
+        let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+        assert_eq!(err["kind"], "invalid");
+        assert!(err["error"].as_str().unwrap().contains("提案 'link:x:y' はありません"), "{err}");
+        assert!(output.stdout.is_empty());
+    }
+    assert_eq!(std::fs::read(review_json_path(dir.path())).unwrap(), before);
+}
+
+#[test]
+fn merge_requires_yes() {
+    let server = TestServer::start();
+    let og = server.og();
+    let (a, b, _c) = two_link_proposals(&og);
+    let dir = tempfile::tempdir().unwrap();
+    let key_ab = format!("link:{a}:{b}");
+    json_out(&zl_on(&server, dir.path(), 0.0).args(["--adopt", &key_ab, "--json"]).output().unwrap());
+    let output = zl_on(&server, dir.path(), 0.0).args(["--merge", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+    assert_eq!(err["kind"], "invalid");
+    assert!(main_links(&og).is_empty());
+    assert!(pending(dir.path()).is_empty());
+    let state = std::fs::read_to_string(review_json_path(dir.path())).unwrap();
+    assert!(state.contains(&key_ab), "判断が残っているはず: {state}");
+}
+
+#[test]
+fn review_option_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["--reason", "x"],
+        vec!["--reject", "k", "--reason", "x"],
+        vec!["--undecide", "k", "--reason", "x"],
+        vec!["--adopt", "a", "--reject", "b"],
+        vec!["--merge", "--review"],
+        vec!["--merge", "--yes", "本文"],
+        vec!["--adopt", "k", "本文"],
+    ] {
+        let output = zl(dir.path()).args(&args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+}

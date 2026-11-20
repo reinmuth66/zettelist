@@ -140,7 +140,11 @@ fn includes_on(og: &Omnigraph, branch: &str) -> Result<Vec<(String, String)>, Er
 }
 
 /// review にあって main にない Links と Includes。Links を先に、近い順。
+/// review ブランチがまだなければ、提案はない (ブランチは作らない)。
 pub fn list_proposals(og: &Omnigraph) -> Result<Vec<Proposal>, Error> {
+    if !og.branches()?.iter().any(|b| b == REVIEW) {
+        return Ok(Vec::new());
+    }
     let in_main: HashSet<(String, String)> = links_on(og, MAIN)?.into_iter().map(|(a, b, _)| (a, b)).collect();
     let mut proposals: Vec<Proposal> = links_on(og, REVIEW)?
         .into_iter()
@@ -300,4 +304,31 @@ pub fn apply(og: &Omnigraph, state_path: &Path, queue: &Queue) -> Result<Summary
     // 7. バックアップを積む
     queue.push(Job::Backup { message: summary.message() })?;
     Ok(summary)
+}
+
+/// 提案 1 本への判断を `review.json` に書く。`None` は判断を外す。
+///
+/// `review.lock` を自分で取るので、呼ぶ側は持ったまま呼ばないこと。
+/// `key` が `list_proposals` になければ、何も書かずに `Error::Invalid`。
+pub fn decide(
+    og: &Omnigraph,
+    state_path: &Path,
+    lock_path: &Path,
+    key: &str,
+    decision: Option<Decision>,
+) -> Result<(), Error> {
+    let _lock = lock_review(lock_path)?;
+    if !list_proposals(og)?.iter().any(|p| p.key() == key) {
+        return Err(Error::Invalid(format!("提案 '{key}' はありません")));
+    }
+    let mut state = ReviewState::load(state_path)?;
+    match decision {
+        Some(d) => {
+            state.decisions.insert(key.to_string(), d);
+        }
+        None => {
+            state.decisions.remove(key);
+        }
+    }
+    state.save(state_path)
 }
