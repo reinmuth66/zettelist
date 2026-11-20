@@ -147,23 +147,89 @@ fn truncate(s: &str) -> String {
 /// 終了コードや `code` (接続失敗でも `api_contract_mismatch` になる) では見分けず、
 /// `request_dispatched` と `http_status` を見る。
 fn classify(out: &Output) -> Error {
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if let Ok(v) = serde_json::from_str::<Value>(&stdout) {
-        let message = v.get("error").and_then(Value::as_str).unwrap_or(&stdout).to_string();
-        let status = v.get("http_status").and_then(Value::as_u64);
-        let not_dispatched = v.get("request_dispatched").and_then(Value::as_bool) == Some(false);
-        let transient = match status {
-            Some(s) => s >= 500,
-            None => not_dispatched,
+    classify_parts(&out.status.to_string(), &String::from_utf8_lossy(&out.stdout), &String::from_utf8_lossy(&out.stderr))
+}
+
+/// `classify` の本体。終了状態は文言にだけ使うので、文字列で受ける (テストで合成した出力を渡せる)。
+///
+/// HTTP の応答がある (`http_status`) ときは状態コードで決める: 5xx、429 (書き込み前の拒否で
+/// `Retry-After` 後に再試行できる)、408 は Transient、そのほかの 4xx は Permanent。
+/// 応答がないときは、`request_dispatched` が false (送っていない) でも、false でない
+/// (送ったあとに切れた、サーバーの再起動、CLI の時間切れ) でも Transient にする。
+/// 待ち行列の仕事はどれも冪等なので、送ったあとに切れても再実行して構わない。
+fn classify_parts(status: &str, stdout: &str, stderr: &str) -> Error {
+    if let Ok(v) = serde_json::from_str::<Value>(stdout) {
+        let message = v.get("error").and_then(Value::as_str).unwrap_or(stdout).to_string();
+        let transient = match v.get("http_status").and_then(Value::as_u64) {
+            Some(s) => s >= 500 || s == 429 || s == 408,
+            None => true,
         };
         return if transient { Error::Transient(message) } else { Error::Permanent(message) };
     }
     // `--json` のない呼び出し (export) は、標準エラーの文で見分ける。
     let text = stderr.trim().to_string();
-    let message = if text.is_empty() { format!("omnigraph が失敗しました ({})", out.status) } else { text };
+    let message = if text.is_empty() { format!("omnigraph が失敗しました ({status})") } else { text };
     let transient = message.contains("this data request was not sent")
         || message.contains("connection failed")
         || (500..600).any(|s| message.contains(&format!("HTTP {s}")));
     if transient { Error::Transient(message) } else { Error::Permanent(message) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(e: &Error) -> &'static str {
+        match e {
+            Error::Transient(_) => "Transient",
+            Error::Permanent(_) => "Permanent",
+            Error::Invalid(_) => "Invalid",
+        }
+    }
+
+    fn json_out(v: Value) -> Error {
+        classify_parts("exit status: 1", &v.to_string(), "")
+    }
+
+    #[test]
+    fn http_5xx_is_transient() {
+        let e = json_out(json!({"error":"boom","http_status":503,"request_dispatched":true}));
+        assert_eq!(kind(&e), "Transient");
+    }
+
+    #[test]
+    fn http_4xx_is_permanent_even_with_api_contract_mismatch() {
+        let e = json_out(json!({"error":"bad","code":"api_contract_mismatch","http_status":400,"request_dispatched":true}));
+        assert_eq!(kind(&e), "Permanent");
+        let e = json_out(json!({"error":"nope","http_status":404,"request_dispatched":true}));
+        assert_eq!(kind(&e), "Permanent");
+    }
+
+    #[test]
+    fn http_429_and_408_are_transient() {
+        assert_eq!(kind(&json_out(json!({"error":"slow down","http_status":429,"request_dispatched":true}))), "Transient");
+        assert_eq!(kind(&json_out(json!({"error":"timeout","http_status":408,"request_dispatched":true}))), "Transient");
+    }
+
+    #[test]
+    fn no_status_is_transient_whether_or_not_dispatched() {
+        let not_sent = json_out(json!({"error":"connection failed","code":"api_contract_mismatch","request_dispatched":false}));
+        assert_eq!(kind(&not_sent), "Transient");
+        let sent = json_out(json!({"error":"connection closed","code":"api_contract_mismatch","request_dispatched":true}));
+        assert_eq!(kind(&sent), "Transient");
+        let unknown = json_out(json!({"error":"timed out"}));
+        assert_eq!(kind(&unknown), "Transient");
+    }
+
+    #[test]
+    fn non_json_stderr_is_classified_by_text() {
+        let e = classify_parts("exit status: 1", "", "error: connection failed: refused");
+        assert_eq!(kind(&e), "Transient");
+        let e = classify_parts("exit status: 1", "", "error: HTTP 502 bad gateway");
+        assert_eq!(kind(&e), "Transient");
+        let e = classify_parts("exit status: 1", "", "error: unknown flag");
+        assert_eq!(kind(&e), "Permanent");
+        let e = classify_parts("exit status: 2", "", "");
+        assert_eq!(kind(&e), "Permanent");
+    }
 }
