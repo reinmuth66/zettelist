@@ -16,6 +16,15 @@ impl Error {
     pub fn is_transient(&self) -> bool {
         matches!(self, Error::Transient(_))
     }
+
+    /// JSON の `kind` に出す名前。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Error::Invalid(_) => "invalid",
+            Error::Permanent(_) => "permanent",
+            Error::Transient(_) => "transient",
+        }
+    }
 }
 
 impl fmt::Display for Error {
