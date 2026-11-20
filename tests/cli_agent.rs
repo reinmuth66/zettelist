@@ -1051,12 +1051,33 @@ fn skill_export_option_usage_errors() {
     assert!(!target.exists());
 }
 
+/// skill に、オプション名がそのまま (別のオプションの前半ではなく) 書かれているか。
+/// `--retry` が `--retry-all` の前半に一致して通ってしまわないよう、前後の文字を見る。
+fn mentions_option(text: &str, option: &str) -> bool {
+    let is_name = |c: char| c.is_ascii_alphanumeric() || c == '-';
+    text.match_indices(option).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + option.len()..].chars().next();
+        !before.is_some_and(is_name) && !after.is_some_and(is_name)
+    })
+}
+
 #[test]
-fn skill_mentions_every_action() {
+fn skill_mentions_every_option() {
+    let skill = zettelist::skill::SKILL;
     for option in [
-        "--inbox", "--show", "--similar", "--promote", "--delete", "--review", "--adopt", "--reject", "--undecide",
-        "--merge", "--failed", "--retry", "--retry-all", "--discard", "--yes", "--skill-export", "--json",
+        "--inbox", "--show", "--similar", "--promote", "--title", "--body", "--body-file", "--delete", "--review",
+        "--adopt", "--reason", "--reject", "--undecide", "--merge", "--failed", "--retry", "--retry-all", "--discard",
+        "--yes", "--json", "--reembed", "--backup", "--worker", "--skill-export", "--force", "-s", "-p",
     ] {
-        assert!(zettelist::skill::SKILL.contains(option), "skill に {option} がありません");
+        assert!(mentions_option(skill, option), "skill に {option} がありません");
     }
+}
+
+#[test]
+fn mentions_option_tells_retry_from_retry_all() {
+    assert!(mentions_option("`--retry-all` だけ", "--retry-all"));
+    assert!(!mentions_option("`--retry-all` だけ", "--retry"));
+    assert!(mentions_option("`--retry` と `--retry-all`", "--retry"));
+    assert!(!mentions_option("zl --promote", "-s"));
 }
