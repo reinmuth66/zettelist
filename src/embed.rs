@@ -42,12 +42,15 @@ impl Embedder for OllamaEmbedder {
         }
         if status >= 400 {
             let detail = resp.body_mut().read_to_string().unwrap_or_default();
-            return Err(Error::Permanent(format!("Ollama が {status} を返しました: {detail}")));
+            let message = format!("Ollama が {status} を返しました: {detail}");
+            // 408 (タイムアウト) と 429 (制限) は待てば通る。モデル未取得の 404 などは直すまで通らない。
+            return Err(if status == 408 || status == 429 { Error::Transient(message) } else { Error::Permanent(message) });
         }
-        let body: Value = resp
-            .body_mut()
-            .read_json()
-            .map_err(|e| Error::Permanent(format!("Ollama の応答を読めません: {e}")))?;
+        let body: Value = resp.body_mut().read_json().map_err(|e| match e {
+            // 中身が JSON でないのは Ollama 側の仕様のずれ。読み込みの途中で切れた、時間切れなどは再試行で通りうる。
+            ureq::Error::Json(_) => Error::Permanent(format!("Ollama の応答を読めません: {e}")),
+            _ => Error::Transient(format!("Ollama の応答を読めません: {e}")),
+        })?;
         let vector = body
             .pointer("/data/0/embedding")
             .and_then(Value::as_array)
@@ -79,17 +82,32 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    /// 1 回だけ応答する偽の Ollama を立てて、ベース URL を返す。
-    fn fake_ollama(status: &str, body: String) -> String {
+    /// 偽の Ollama。受けた要求の 1 行目と本文は `finish` で取り出す。
+    struct Fake {
+        base: String,
+        handle: std::thread::JoinHandle<()>,
+        rx: std::sync::mpsc::Receiver<(String, String)>,
+    }
+
+    impl Fake {
+        /// スレッドの終了を待つ (中で panic していればここで落ちる)。受けた要求の 1 行目と本文を返す。
+        fn finish(self) -> (String, String) {
+            self.handle.join().expect("偽 Ollama のスレッドが panic しました");
+            self.rx.recv().expect("要求が届いていません")
+        }
+    }
+
+    /// 1 回だけ、`response` をそのまま返す偽の Ollama を立てる。
+    fn fake_raw(response: String) -> Fake {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let status = status.to_string();
-        std::thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
             let (mut s, _) = listener.accept().unwrap();
             // ヘッダーと Content-Length 分の本文を読み切ってから返す
             let mut buf = Vec::new();
             let mut chunk = [0u8; 4096];
-            loop {
+            let (head, body) = loop {
                 let n = s.read(&mut chunk).unwrap();
                 buf.extend_from_slice(&chunk[..n]);
                 let text = String::from_utf8_lossy(&buf).to_string();
@@ -99,20 +117,22 @@ mod tests {
                         .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
                         .unwrap_or(0);
                     if buf.len() >= pos + 4 + len {
-                        break;
+                        break (text[..pos].to_string(), String::from_utf8_lossy(&buf[pos + 4..pos + 4 + len]).to_string());
                     }
                 }
-                if n == 0 {
-                    break;
-                }
-            }
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            s.write_all(resp.as_bytes()).unwrap();
+                assert!(n > 0, "要求を読み切る前に切れました");
+            };
+            tx.send((head.lines().next().unwrap_or_default().to_string(), body)).unwrap();
+            s.write_all(response.as_bytes()).unwrap();
         });
-        base
+        Fake { base, handle, rx }
+    }
+
+    fn fake_ollama(status: &str, body: String) -> Fake {
+        fake_raw(format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ))
     }
 
     fn embedder(base: &str) -> OllamaEmbedder {
@@ -126,18 +146,23 @@ mod tests {
 
     #[test]
     fn ollama_returns_vector() {
-        let base = fake_ollama("200 OK", body_with(1024));
-        let v = embedder(&base).embed("こんにちは").unwrap();
+        let fake = fake_ollama("200 OK", body_with(1024));
+        let v = embedder(&fake.base).embed("こんにちは").unwrap();
         assert_eq!(v.len(), 1024);
+        let (line, body) = fake.finish();
+        assert!(line.starts_with("POST /v1/embeddings"), "{line}");
+        let sent: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(sent, json!({ "model": "m", "input": "こんにちは" }));
     }
 
     #[test]
     fn wrong_dimension_is_permanent() {
-        let base = fake_ollama("200 OK", body_with(3));
-        let e = embedder(&base).embed("x").unwrap_err();
+        let fake = fake_ollama("200 OK", body_with(3));
+        let e = embedder(&fake.base).embed("x").unwrap_err();
         assert!(matches!(e, Error::Permanent(_)), "{e:?}");
         assert!(e.to_string().contains("1024"), "{e}");
         assert_eq!(e.to_string(), "埋め込みの次元が 1024 ではありません (3)。embed.model を確かめてください");
+        fake.finish();
     }
 
     #[test]
@@ -148,16 +173,47 @@ mod tests {
 
     #[test]
     fn server_error_is_transient() {
-        let base = fake_ollama("503 Service Unavailable", "{}".to_string());
-        let e = embedder(&base).embed("x").unwrap_err();
+        let fake = fake_ollama("503 Service Unavailable", "{}".to_string());
+        let e = embedder(&fake.base).embed("x").unwrap_err();
         assert!(e.is_transient(), "{e:?}");
+        fake.finish();
+    }
+
+    #[test]
+    fn rate_limit_and_request_timeout_are_transient() {
+        for status in ["429 Too Many Requests", "408 Request Timeout"] {
+            let fake = fake_ollama(status, "{}".to_string());
+            let e = embedder(&fake.base).embed("x").unwrap_err();
+            assert!(e.is_transient(), "{status}: {e:?}");
+            fake.finish();
+        }
     }
 
     #[test]
     fn client_error_is_permanent() {
-        let base = fake_ollama("404 Not Found", "{\"error\":\"model not found\"}".to_string());
-        let e = embedder(&base).embed("x").unwrap_err();
+        let fake = fake_ollama("404 Not Found", "{\"error\":\"model not found\"}".to_string());
+        let e = embedder(&fake.base).embed("x").unwrap_err();
         assert!(matches!(e, Error::Permanent(_)), "{e:?}");
+        fake.finish();
+    }
+
+    #[test]
+    fn non_json_body_is_permanent() {
+        let fake = fake_ollama("200 OK", "これは JSON ではありません".to_string());
+        let e = embedder(&fake.base).embed("x").unwrap_err();
+        assert!(matches!(e, Error::Permanent(_)), "{e:?}");
+        fake.finish();
+    }
+
+    #[test]
+    fn body_cut_off_midway_is_transient() {
+        // Content-Length より短い本文で接続を閉じる
+        let fake = fake_raw(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n{\"data\":".to_string(),
+        );
+        let e = embedder(&fake.base).embed("x").unwrap_err();
+        assert!(e.is_transient(), "{e:?}");
+        fake.finish();
     }
 
     #[test]
