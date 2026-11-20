@@ -376,3 +376,203 @@ fn similar_permanent_excludes_self_and_caps_at_three() {
     assert_eq!(perm.len(), 3, "{out}");
     assert!(perm.iter().all(|n| n["slug"] != me.as_str()), "{out}");
 }
+
+// ---- 昇格と削除 (--promote、--delete) ----
+
+fn inbox_slugs(server: &TestServer, dir: &std::path::Path) -> Vec<String> {
+    let out = json_out(&zl_on(server, dir, 0.0).args(["--inbox", "--json"]).output().unwrap());
+    out.as_array().unwrap().iter().map(|i| i["slug"].as_str().unwrap().to_string()).collect()
+}
+
+fn show_exists(server: &TestServer, dir: &std::path::Path, slug: &str) -> bool {
+    zl_on(server, dir, 0.0).args(["--show", slug, "--json"]).output().unwrap().status.success()
+}
+
+#[test]
+fn promote_creates_permanent_and_queues_job() {
+    let server = TestServer::start();
+    let og = server.og();
+    let now = Local::now();
+    let a = write_note(&og, &new_note("元 A", None, now - Duration::hours(2))).unwrap();
+    let b = write_note(&og, &new_note("元 B", None, now - Duration::hours(1))).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let list = format!("{},{}", a.slug, b.slug);
+    let out = json_out(
+        &zl_on(&server, dir.path(), 0.0)
+            .args(["--promote", &list, "--title", "T", "--body", "B", "--json"])
+            .output()
+            .unwrap(),
+    );
+    let slug = out["slug"].as_str().unwrap().to_string();
+    assert!(inbox_slugs(&server, dir.path()).is_empty());
+    let shown = json_out(&zl_on(&server, dir.path(), 0.0).args(["--show", &slug, "--json"]).output().unwrap());
+    assert_eq!(shown["kind"], "permanent");
+    assert_eq!(shown["title"], "T");
+    assert_eq!(shown["body"], "B");
+    let jobs = pending(dir.path());
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert_eq!(jobs[0]["job"]["Promote"]["slug"], slug);
+}
+
+#[test]
+fn promote_reads_body_file() {
+    let server = TestServer::start();
+    let og = server.og();
+    let a = write_note(&og, &new_note("元", None, Local::now())).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("body.md");
+    std::fs::write(&file, "ファイルの本文\n二行目").unwrap();
+    let out = json_out(
+        &zl_on(&server, dir.path(), 0.0)
+            .args(["--promote", &a.slug, "--title", "題", "--body-file", file.to_str().unwrap(), "--json"])
+            .output()
+            .unwrap(),
+    );
+    let slug = out["slug"].as_str().unwrap();
+    let shown = json_out(&zl_on(&server, dir.path(), 0.0).args(["--show", slug, "--json"]).output().unwrap());
+    assert_eq!(shown["body"], "ファイルの本文\n二行目");
+}
+
+#[test]
+fn promote_unreadable_body_file_is_invalid() {
+    let server = TestServer::start();
+    let og = server.og();
+    let a = write_note(&og, &new_note("元", None, Local::now())).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nosuch.md");
+    let output = zl_on(&server, dir.path(), 0.0)
+        .args(["--promote", &a.slug, "--title", "題", "--body-file", missing.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+    assert_eq!(err["kind"], "invalid");
+    assert_eq!(inbox_slugs(&server, dir.path()), vec![a.slug.clone()]);
+    assert!(pending(dir.path()).is_empty());
+}
+
+#[test]
+fn promote_permanent_slug_is_invalid() {
+    let server = TestServer::start();
+    let og = server.og();
+    let now = Local::now();
+    let f = write_note(&og, &new_note("元", None, now - Duration::hours(1))).unwrap();
+    let live = write_note(&og, &new_note("まだ inbox", None, now)).unwrap();
+    let p = promote(&og, &[(NoteKind::Fleeting, f.slug.clone())], "既存", "既存の本文", now + Duration::hours(1)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let list = format!("{},{}", live.slug, p);
+    let output = zl_on(&server, dir.path(), 0.0)
+        .args(["--promote", &list, "--title", "T", "--body", "B", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+    assert_eq!(err["kind"], "invalid");
+    // 何も書かれていない: live は inbox に残り、Permanent は 1 件のまま
+    assert_eq!(inbox_slugs(&server, dir.path()), vec![live.slug.clone()]);
+    assert!(pending(dir.path()).is_empty());
+    let count = og
+        .query("main", "query q() { match { $n: Permanent } return { $n.slug as slug } }", serde_json::json!({}))
+        .unwrap()
+        .len();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn promote_unknown_slug_is_invalid() {
+    let server = TestServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl_on(&server, dir.path(), 0.0)
+        .args(["--promote", "nosuch", "--title", "T", "--body", "B", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn promote_blank_title_is_invalid() {
+    let server = TestServer::start();
+    let og = server.og();
+    let a = write_note(&og, &new_note("元", None, Local::now())).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl_on(&server, dir.path(), 0.0)
+        .args(["--promote", &a.slug, "--title", "  ", "--body", "B", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(inbox_slugs(&server, dir.path()), vec![a.slug.clone()]);
+    assert!(pending(dir.path()).is_empty());
+}
+
+#[test]
+fn promote_option_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["--promote", "a", "--title", "T"],
+        vec!["--promote", "a", "--body", "B"],
+        vec!["--promote", "a", "--title", "T", "--body", "B", "--body-file", "x"],
+        vec!["--title", "T"],
+        vec!["--body", "B"],
+        vec!["--body-file", "x"],
+        vec!["--inbox", "--title", "T"],
+        vec!["--promote", "a", "--title", "T", "--body", "B", "--inbox"],
+        vec!["--promote", "a", "--title", "T", "--body", "B", "メモ"],
+    ] {
+        let output = zl(dir.path()).args(&args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    assert!(pending(dir.path()).is_empty());
+}
+
+#[test]
+fn delete_requires_yes() {
+    let server = TestServer::start();
+    let og = server.og();
+    let a = write_note(&og, &new_note("残る", None, Local::now())).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let output = zl_on(&server, dir.path(), 0.0).args(["--delete", &a.slug, "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+    assert_eq!(err["kind"], "invalid");
+    assert!(err["error"].as_str().unwrap().contains("--yes"), "{err}");
+    assert!(show_exists(&server, dir.path(), &a.slug));
+}
+
+#[test]
+fn delete_with_yes_removes() {
+    let server = TestServer::start();
+    let og = server.og();
+    let now = Local::now();
+    let a = write_note(&og, &new_note("消す A", None, now - Duration::hours(2))).unwrap();
+    let b = write_note(&og, &new_note("消す B", None, now - Duration::hours(1))).unwrap();
+    let keep = write_note(&og, &new_note("残す", None, now)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let list = format!("{},{}", a.slug, b.slug);
+    let out = json_out(&zl_on(&server, dir.path(), 0.0).args(["--delete", &list, "--yes", "--json"]).output().unwrap());
+    assert_eq!(out, serde_json::json!({"ok": true}));
+    assert_eq!(inbox_slugs(&server, dir.path()), vec![keep.slug.clone()]);
+    assert!(!show_exists(&server, dir.path(), &a.slug));
+}
+
+#[test]
+fn delete_unknown_is_invalid_and_deletes_nothing() {
+    let server = TestServer::start();
+    let og = server.og();
+    let a = write_note(&og, &new_note("残る", None, Local::now())).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let list = format!("{},nosuch", a.slug);
+    let output = zl_on(&server, dir.path(), 0.0).args(["--delete", &list, "--yes", "--json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
+    assert_eq!(err["kind"], "invalid");
+    assert!(show_exists(&server, dir.path(), &a.slug));
+}
+
+#[test]
+fn delete_conflicts_with_other_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [vec!["--delete", "a", "--yes", "--inbox"], vec!["--delete", "a", "--promote", "b", "--yes"], vec!["--delete", "a", "--yes", "本文"]] {
+        let output = zl(dir.path()).args(&args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+}

@@ -19,7 +19,8 @@ use std::process::ExitCode;
 /// Zettelkasten on Omnigraph の書き込みと整理の道具
 #[derive(Parser)]
 #[command(name = "zettelist", version)]
-#[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "show", "similar", "review"]).multiple(false))]
+#[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete"]).multiple(false))]
+#[command(group = ArgGroup::new("promote_body").args(["promote_body_text", "promote_body_file"]).multiple(false))]
 struct Cli {
     /// 出典 (ISBN、DOI、arXiv ID、URL、または登録済みのスラッグ)
     #[arg(short = 's', long = "source", value_name = "出典", conflicts_with = "action")]
@@ -68,6 +69,36 @@ struct Cli {
     /// 提案の一覧
     #[arg(long)]
     review: bool,
+
+    /// 昇格元のノートから Permanent を作る (スラッグをカンマで区切る)。`--title` と、`--body` か `--body-file` が要る
+    #[arg(long, value_name = "スラッグ,...", requires = "title", requires = "promote_body")]
+    promote: Option<String>,
+
+    /// 昇格する Permanent の題名
+    #[arg(long, value_name = "題", requires = "promote")]
+    title: Option<String>,
+
+    /// 昇格する Permanent の本文
+    #[arg(long = "body", value_name = "本文", requires = "promote")]
+    promote_body_text: Option<String>,
+
+    /// 昇格する Permanent の本文を読むファイル
+    #[arg(long = "body-file", value_name = "パス", requires = "promote")]
+    promote_body_file: Option<String>,
+
+    /// ノートを消す (スラッグをカンマで区切る)。`--yes` が要る
+    #[arg(long, value_name = "スラッグ,...")]
+    delete: Option<String>,
+
+    /// 消す・捨てる・マージするを確かめた上で行う
+    #[arg(long)]
+    yes: bool,
+}
+
+/// 昇格する Permanent の本文の出どころ。
+enum BodySource {
+    Text(String),
+    File(String),
 }
 
 /// 1 回の実行で行う操作。
@@ -80,6 +111,8 @@ enum Action {
     Show(String),
     Similar(String),
     Review,
+    Promote { slugs: String, title: String, body: BodySource },
+    Delete { slugs: String, yes: bool },
     Tui,
 }
 
@@ -99,6 +132,15 @@ impl Cli {
             Action::Similar(slug)
         } else if self.review {
             Action::Review
+        } else if let Some(slugs) = self.promote {
+            // clap が `requires` で、題名と本文があることを保証している
+            let body = match (self.promote_body_text, self.promote_body_file) {
+                (Some(text), _) => BodySource::Text(text),
+                (None, file) => BodySource::File(file.unwrap_or_default()),
+            };
+            Action::Promote { slugs, title: self.title.unwrap_or_default(), body }
+        } else if let Some(slugs) = self.delete {
+            Action::Delete { slugs, yes: self.yes }
         } else if let Some(body) = self.body {
             Action::Write(NewNote { body, source: self.source, locator: self.locator, created: Local::now() })
         } else {
@@ -183,6 +225,8 @@ fn dispatch(json: bool, action: Action) -> Result<(), Error> {
         Action::Inbox => inbox_list(json),
         Action::Show(slug) => show(json, &slug),
         Action::Similar(slug) => similar(json, &slug),
+        Action::Promote { slugs, title, body } => promote_notes(json, &slugs, &title, body),
+        Action::Delete { slugs, yes } => delete_notes_cmd(json, &slugs, yes),
         // 次のタスクで実装する
         Action::Review => Err(Error::Permanent("未実装".to_string())),
     }
@@ -270,6 +314,59 @@ fn show(json: bool, slug: &str) -> Result<(), Error> {
         }),
         &human,
     );
+    Ok(())
+}
+
+/// カンマ区切りのスラッグを、順序を保って重複なしの一覧にする。空なら入力の誤り。
+fn parse_slugs(list: &str) -> Result<Vec<String>, Error> {
+    let mut slugs: Vec<String> = Vec::new();
+    for s in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if !slugs.iter().any(|x| x == s) {
+            slugs.push(s.to_string());
+        }
+    }
+    if slugs.is_empty() {
+        return Err(Error::Invalid("スラッグがありません".to_string()));
+    }
+    Ok(slugs)
+}
+
+/// スラッグの一覧を (種類, スラッグ) にする。1 件でも知らないスラッグがあれば入力の誤り。
+fn resolve_kinds(ctx: &Ctx, slugs: &[String]) -> Result<Vec<(NoteKind, String)>, Error> {
+    slugs.iter().map(|s| show_note(&ctx.og, s).map(|n| (n.kind, n.slug))).collect()
+}
+
+/// `--promote <slug,...> --title <題> (--body <本文> | --body-file <パス>)`
+fn promote_notes(json: bool, slugs: &str, title: &str, body: BodySource) -> Result<(), Error> {
+    let slugs = parse_slugs(slugs)?;
+    let body = match body {
+        BodySource::Text(text) => text,
+        BodySource::File(path) => std::fs::read_to_string(&path)
+            .map_err(|e| Error::Invalid(format!("本文のファイル '{path}' を読めません: {e}")))?,
+    };
+    let ctx = Ctx::from_env()?;
+    let from = resolve_kinds(&ctx, &slugs)?;
+    let slug = crate::notes::promote(&ctx.og, &from, title, &body, Local::now())?;
+    // 昇格は済んでいるので、後処理の失敗では終了コードを変えない
+    if let Err(e) = ctx.queue.push(Job::Promote { slug: slug.clone() }) {
+        eprintln!("昇格の後処理の登録に失敗しました: {e}");
+    }
+    start_worker(&ctx);
+    output(json, json!({"slug": slug}), &format!("昇格しました {slug}"));
+    Ok(())
+}
+
+/// `--delete <slug,...> --yes`
+fn delete_notes_cmd(json: bool, slugs: &str, yes: bool) -> Result<(), Error> {
+    if !yes {
+        return Err(Error::Invalid("ノートを消すには --yes が要ります".to_string()));
+    }
+    let slugs = parse_slugs(slugs)?;
+    let ctx = Ctx::from_env()?;
+    // 先にすべての種類を確かめる。知らないスラッグがあれば、何も消さない
+    let notes = resolve_kinds(&ctx, &slugs)?;
+    crate::notes::delete_notes(&ctx.og, &notes)?;
+    output(json, json!({"ok": true}), &format!("{} 件消しました", notes.len()));
     Ok(())
 }
 
