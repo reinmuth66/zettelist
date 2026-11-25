@@ -17,10 +17,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     let has_write = app.write_form().is_some();
+    let has_promote = app.promote_title().is_some();
+    let has_confirm = app.confirm_delete_count().is_some();
     let has_msg = app.message().is_some();
     let mut constraints = vec![Constraint::Length(1), Constraint::Min(0)];
     if has_write {
         constraints.push(Constraint::Length(4));
+    }
+    if has_promote {
+        constraints.push(Constraint::Length(3));
+    }
+    if has_confirm {
+        constraints.push(Constraint::Length(1));
     }
     if has_msg {
         constraints.push(Constraint::Length(1));
@@ -42,6 +50,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let mut idx = 2;
     if has_write {
         draw_write_form(frame, app, chunks[idx]);
+        idx += 1;
+    }
+    if has_promote {
+        draw_promote_title(frame, app, chunks[idx]);
+        idx += 1;
+    }
+    if let Some(count) = app.confirm_delete_count() {
+        let p = Paragraph::new(format!("{count} 件消します。よろしいですか [y/N]"))
+            .style(Style::default().fg(app.settings().theme.error));
+        frame.render_widget(p, chunks[idx]);
         idx += 1;
     }
     if has_msg {
@@ -359,6 +377,38 @@ fn render_source_field(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+fn draw_promote_title(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(input) = app.promote_title() else {
+        return;
+    };
+    let theme = &app.settings().theme;
+    let block = Block::bordered();
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let label = "題    ";
+    let label_w = label.width() as u16;
+    let field_w = inner.width.saturating_sub(label_w);
+    let (text, col) = input.view(field_w);
+    let line = Line::from(vec![
+        Span::styled(
+            label,
+            Style::default().fg(theme.cursor).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(text),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let cx = (inner.x + label_w + col).min(inner.x + inner.width.saturating_sub(1));
+    frame.set_cursor_position((cx, inner.y));
+}
+
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let w = area.width.min(50);
     let h = area.height.min(12);
@@ -516,5 +566,19 @@ mod tests {
         assert!(screen.contains("p.42"), "{screen}");
         let footer = screen.lines().last().unwrap_or("");
         assert!(footer.contains("Enter") && footer.contains("Tab") && footer.contains("Esc"), "{footer}");
+    }
+
+    #[test]
+    fn promote_title_and_delete_confirm_render() {
+        let mut app = App::new(Box::new(three_store()), settings());
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        let screen = render(&app, 100, 20);
+        assert!(screen.contains("題"), "{screen}");
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let screen2 = render(&app, 100, 20);
+        assert!(screen2.contains("1 件消します。よろしいですか [y/N]"), "{screen2}");
     }
 }

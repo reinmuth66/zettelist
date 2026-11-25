@@ -1,6 +1,7 @@
 use crate::notes::{InboxItem, Near, NewNote, NoteKind, SourceSummary};
 use crate::ops::WriteOutcome;
-use crate::source_ref::kind_hint;
+use crate::source_ref::{kind_hint, source_url};
+use crate::tui::draft;
 use crate::tui::input::LineInput;
 use crate::tui::keys::{Action, Keymap, Resolved, Screen};
 use crate::tui::store::Store;
@@ -76,6 +77,18 @@ impl WriteForm {
     }
 }
 
+enum PromoteState {
+    Title {
+        from: Vec<(NoteKind, String)>,
+        items: Vec<InboxItem>,
+        input: LineInput,
+    },
+    Editing {
+        from: Vec<(NoteKind, String)>,
+        title: String,
+    },
+}
+
 pub struct App {
     store: Box<dyn Store>,
     settings: Settings,
@@ -92,6 +105,8 @@ pub struct App {
     failed_count: usize,
     show_help: bool,
     write_form: Option<WriteForm>,
+    promote: Option<PromoteState>,
+    confirm_delete: Option<Vec<(NoteKind, String)>>,
 }
 
 impl App {
@@ -112,6 +127,8 @@ impl App {
             failed_count: 0,
             show_help: false,
             write_form: None,
+            promote: None,
+            confirm_delete: None,
         };
         app.reload_inbox();
         app
@@ -191,6 +208,13 @@ impl App {
 
         if self.write_form.is_some() {
             self.handle_write_key(key);
+            return None;
+        }
+        if matches!(self.promote, Some(PromoteState::Title { .. })) {
+            return self.handle_promote_title_key(key);
+        }
+        if self.confirm_delete.is_some() {
+            self.handle_confirm_delete_key(key);
             return None;
         }
 
@@ -279,6 +303,20 @@ impl App {
             Action::Write => {
                 if self.selected.is_empty() {
                     self.open_write_form();
+                } else {
+                    self.open_promote_title();
+                }
+            }
+            Action::Delete => {
+                self.open_confirm_delete();
+            }
+            Action::OpenSource => {
+                if let Some(item) = self.current_item() {
+                    if item.kind == NoteKind::Literature {
+                        if let Some(url) = item.source_id.as_deref().and_then(source_url) {
+                            return Some(Effect::Open(url));
+                        }
+                    }
                 }
             }
             Action::ToReview => {
@@ -296,6 +334,10 @@ impl App {
 
     pub fn message(&self) -> Option<&str> {
         self.message.as_deref()
+    }
+
+    pub fn set_message(&mut self, msg: impl Into<String>) {
+        self.message = Some(msg.into());
     }
 
     pub fn screen(&self) -> Screen {
@@ -370,6 +412,139 @@ impl App {
 
     pub fn write_form(&self) -> Option<&WriteForm> {
         self.write_form.as_ref()
+    }
+
+    pub fn promote_title(&self) -> Option<&LineInput> {
+        match &self.promote {
+            Some(PromoteState::Title { input, .. }) => Some(input),
+            _ => None,
+        }
+    }
+
+    pub fn confirm_delete_count(&self) -> Option<usize> {
+        self.confirm_delete.as_ref().map(Vec::len)
+    }
+
+    fn open_promote_title(&mut self) {
+        let items: Vec<InboxItem> = self
+            .inbox
+            .iter()
+            .filter(|i| self.is_selected(i))
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let from = items.iter().map(|i| (i.kind, i.slug.clone())).collect();
+        self.pending_key = None;
+        self.promote = Some(PromoteState::Title {
+            from,
+            items,
+            input: LineInput::new(""),
+        });
+    }
+
+    fn handle_promote_title_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        match key.code {
+            KeyCode::Esc => {
+                self.promote = None;
+                None
+            }
+            KeyCode::Enter => {
+                let Some(PromoteState::Title { from, items, input }) = self.promote.take() else {
+                    return None;
+                };
+                let title = input.text().trim().to_string();
+                if title.is_empty() {
+                    return None;
+                }
+                let draft = draft::build(&items);
+                self.promote = Some(PromoteState::Editing { from, title });
+                Some(Effect::Edit { draft })
+            }
+            _ => {
+                if let Some(PromoteState::Title { input, .. }) = self.promote.as_mut() {
+                    input.handle(key);
+                }
+                None
+            }
+        }
+    }
+
+    /// `$EDITOR` 終了後の結果を受け取って昇格を完了または取り消す。
+    pub fn finish_promote(&mut self, body: Result<String, String>) {
+        let Some(PromoteState::Editing { from, title }) = self.promote.take() else {
+            return;
+        };
+        let text = match body {
+            Ok(t) => t,
+            Err(reason) => {
+                self.message = Some(if reason.trim().is_empty() {
+                    "昇格を取り消しました".to_string()
+                } else {
+                    format!("昇格を取り消しました: {reason}")
+                });
+                return;
+            }
+        };
+        let Some(parsed) = draft::parse(&text) else {
+            self.message = Some("昇格を取り消しました".to_string());
+            return;
+        };
+        match self.store.promote(&from, &title, &parsed) {
+            Ok(done) => {
+                let mut msg = format!("昇格しました {}", done.value);
+                for w in [done.queue_warning, done.worker_warning].into_iter().flatten() {
+                    msg.push_str(" / ");
+                    msg.push_str(&w);
+                }
+                self.message = Some(msg);
+                self.selected.clear();
+                self.reload_inbox();
+            }
+            Err(e) => {
+                self.message = Some(e.to_string());
+            }
+        }
+    }
+
+    fn open_confirm_delete(&mut self) {
+        if self.inbox.is_empty() {
+            return;
+        }
+        let targets: Vec<(NoteKind, String)> = if self.selected.is_empty() {
+            self.current_item()
+                .map(|i| vec![(i.kind, i.slug.clone())])
+                .unwrap_or_default()
+        } else {
+            self.inbox
+                .iter()
+                .filter(|i| self.is_selected(i))
+                .map(|i| (i.kind, i.slug.clone()))
+                .collect()
+        };
+        if targets.is_empty() {
+            return;
+        }
+        self.pending_key = None;
+        self.confirm_delete = Some(targets);
+    }
+
+    fn handle_confirm_delete_key(&mut self, key: KeyEvent) {
+        let Some(targets) = self.confirm_delete.take() else {
+            return;
+        };
+        if matches!((key.code, key.modifiers), (KeyCode::Char('y'), KeyModifiers::NONE)) {
+            match self.store.delete(&targets) {
+                Ok(()) => {
+                    self.selected.clear();
+                    self.reload_inbox();
+                }
+                Err(e) => {
+                    self.message = Some(e.to_string());
+                }
+            }
+        }
     }
 
     fn open_write_form(&mut self) {
@@ -517,20 +692,56 @@ impl App {
                 ("Esc".to_string(), "中止"),
             ];
         }
-        let pairs: &[(Action, &'static str)] = match self.screen {
-            Screen::Inbox => &[
+        if self.promote_title().is_some() {
+            return vec![
+                ("Enter".to_string(), "決定"),
+                ("Esc".to_string(), "中止"),
+            ];
+        }
+        if self.confirm_delete.is_some() {
+            return vec![
+                ("y".to_string(), "削除"),
+                ("他".to_string(), "中止"),
+            ];
+        }
+        if self.screen == Screen::Inbox {
+            let mut pairs: Vec<(Action, &'static str)> = vec![
+                (
+                    Action::Write,
+                    if self.selected.is_empty() { "書く" } else { "昇格" },
+                ),
                 (Action::Toggle, "選ぶ"),
                 (Action::ClearSelection, "選択解除"),
+            ];
+            if !self.inbox.is_empty() {
+                pairs.push((Action::Delete, "削除"));
+            }
+            if self
+                .current_item()
+                .is_some_and(|i| i.kind == NoteKind::Literature && i.source_id.as_deref().and_then(source_url).is_some())
+            {
+                pairs.push((Action::OpenSource, "出典を開く"));
+            }
+            pairs.extend([
                 (Action::ToReview, "レビュー"),
                 (Action::ToFailed, "失敗"),
                 (Action::Help, "ヘルプ"),
                 (Action::Quit, "終了"),
-            ],
-            Screen::Review | Screen::Failed => &[
-                (Action::Back, "戻る"),
-                (Action::Help, "ヘルプ"),
-            ],
-        };
+            ]);
+            return pairs
+                .into_iter()
+                .filter_map(|(act, desc)| {
+                    self.settings
+                        .keys
+                        .label(self.screen, act)
+                        .map(|k| (k, desc))
+                })
+                .collect();
+        }
+        let pairs: &[(Action, &'static str)] = &[
+            (Action::Back, "戻る"),
+            (Action::Help, "ヘルプ"),
+        ];
         pairs
             .iter()
             .filter_map(|(act, desc)| {
@@ -833,5 +1044,109 @@ mod tests {
         app.on_key(key(' '));
         app.on_key(key('i'));
         assert!(app.write_form().is_none());
+    }
+
+    #[test]
+    fn promote_flow_calls_store() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key(' '));
+        app.on_key(key('j'));
+        app.on_key(key(' '));
+        app.on_key(key('i'));
+        type_text(&mut app, "小さいノート");
+        let eff = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(eff, Some(Effect::Edit { .. })));
+
+        app.finish_promote(Ok("本文\n# ---- この行から下は保存時に消える ----".to_string()));
+        let st = store.borrow();
+        assert!(st.calls.iter().any(|c| c == "promote"));
+        assert!(!app.is_selected(&app.inbox()[0]));
+        assert!(app.message().is_some_and(|m| m.contains("昇格しました")));
+    }
+
+    #[test]
+    fn empty_title_cancels_promotion() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key(' '));
+        app.on_key(key('i'));
+        let eff = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(eff, None);
+        assert!(!store.borrow().calls.iter().any(|c| c == "promote"));
+    }
+
+    #[test]
+    fn editor_failure_cancels_promotion() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key(' '));
+        app.on_key(key('i'));
+        type_text(&mut app, "題名");
+        let eff = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(eff, Some(Effect::Edit { .. })));
+
+        app.finish_promote(Err("vi が見つかりません".to_string()));
+        assert!(!store.borrow().calls.iter().any(|c| c == "promote"));
+        assert!(app.message().is_some_and(|m| m.contains("vi が見つかりません")));
+    }
+
+    #[test]
+    fn delete_asks_and_y_deletes() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('d'));
+        assert!(!store.borrow().calls.iter().any(|c| c == "delete"));
+        app.on_key(key('y'));
+        let st = store.borrow();
+        assert!(st.calls.iter().any(|c| c == "delete"));
+        assert_eq!(st.inbox.len(), 2);
+    }
+
+    #[test]
+    fn delete_other_key_cancels() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('d'));
+        app.on_key(key('n'));
+        let st = store.borrow();
+        assert!(!st.calls.iter().any(|c| c == "delete"));
+        assert_eq!(st.inbox.len(), 3);
+    }
+
+    #[test]
+    fn open_only_for_literature_with_url() {
+        let mut store = three_store();
+        store.inbox.push(InboxItem {
+            kind: NoteKind::Literature,
+            slug: "20261120000001".into(),
+            body: "論文メモ".into(),
+            created: Utc::now(),
+            source_slug: Some("smith2020".into()),
+            source_id: Some("doi:10.1/x".into()),
+            locator: None,
+        });
+        let mut app = App::new(Box::new(store), settings());
+        assert_eq!(app.on_key(key('o')), None);
+        app.on_key(key('G'));
+        assert_eq!(
+            app.on_key(key('o')),
+            Some(Effect::Open("https://doi.org/10.1/x".to_string()))
+        );
     }
 }
