@@ -12,6 +12,7 @@ pub mod queue;
 pub mod review;
 pub mod skill;
 pub mod source_ref;
+pub mod tui;
 pub mod worker;
 
 use config::Config;
