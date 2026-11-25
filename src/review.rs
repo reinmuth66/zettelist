@@ -338,3 +338,96 @@ pub fn decide(
     }
     state.save(state_path)
 }
+
+/// main の Hub の概要。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubSummary {
+    pub slug: String,
+    pub title: String,
+}
+
+/// main の Hub を題名の順に返す。
+pub fn hubs(og: &Omnigraph) -> Result<Vec<HubSummary>, Error> {
+    let rows = og.query(
+        MAIN,
+        "query q() { match { $h: Hub } return { $h.slug as slug, $h.title as title } }",
+        json!({}),
+    )?;
+    let mut list: Vec<HubSummary> = rows
+        .iter()
+        .map(|r| HubSummary { slug: text(r, "slug"), title: text(r, "title") })
+        .collect();
+    list.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.slug.cmp(&b.slug)));
+    Ok(list)
+}
+
+/// `rehub` の結果。`unrehub` で元に戻すために使う。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rehubbed {
+    pub old_key: String,
+    pub new_key: String,
+    pub created: bool,
+    pub previous: Option<Decision>,
+}
+
+/// Hub の提案 `key` を別の Hub `hub` へ選び直す。
+///
+/// `review.lock` を自分で取るので、呼ぶ側は持ったまま呼ばないこと。
+pub fn rehub(og: &Omnigraph, state_path: &Path, lock_path: &Path, key: &str, hub: &str) -> Result<Rehubbed, Error> {
+    let _lock = lock_review(lock_path)?;
+    let proposals = list_proposals(og)?;
+    let Some((old_hub, note)) = proposals.iter().find_map(|p| match p {
+        Proposal::Hub { hub: h, note: n } if p.key() == key => Some((h.clone(), n.clone())),
+        _ => None,
+    }) else {
+        return Err(Error::Invalid(format!("Hub の提案 '{key}' はありません")));
+    };
+    let (_, hubs_in_main) = main_nodes(og)?;
+    if !hubs_in_main.contains(hub) {
+        return Err(Error::Invalid(format!("Hub '{hub}' はありません")));
+    }
+    if hub == old_hub {
+        return Err(Error::Invalid("元と同じ Hub です".to_string()));
+    }
+    if includes_on(og, MAIN)?.iter().any(|(h, n)| h == hub && n == &note) {
+        return Err(Error::Invalid("すでにその Hub に入っています".to_string()));
+    }
+
+    let mut state = ReviewState::load(state_path)?;
+    let new_proposal = Proposal::Hub { hub: hub.to_string(), note };
+    let new_key = new_proposal.key();
+    let created = !proposals.iter().any(|p| p.key() == new_key);
+    if created {
+        ensure_review(og)?;
+        og.load(REVIEW, &[new_proposal.line(None)])?;
+    }
+    let previous = state.decisions.get(key).cloned();
+    state.decisions.insert(key.to_string(), Decision::Reject);
+    state.decisions.insert(new_key.clone(), Decision::Adopt { reason: None });
+    state.save(state_path)?;
+    Ok(Rehubbed { old_key: key.to_string(), new_key, created, previous })
+}
+
+/// `rehub` を取り消して、元の状態に戻す。
+///
+/// `review.lock` を自分で取るので、呼ぶ側は持ったまま呼ばないこと。
+pub fn unrehub(og: &Omnigraph, state_path: &Path, lock_path: &Path, r: &Rehubbed) -> Result<(), Error> {
+    let _lock = lock_review(lock_path)?;
+    if r.created {
+        let Some((hub, note)) = r.new_key.strip_prefix("hub:").and_then(|s| s.split_once(':')) else {
+            return Err(Error::Invalid(format!("Hub の鍵ではありません: {}", r.new_key)));
+        };
+        delete_from_review(og, &Proposal::Hub { hub: hub.to_string(), note: note.to_string() })?;
+    }
+    let mut state = ReviewState::load(state_path)?;
+    state.decisions.remove(&r.new_key);
+    match &r.previous {
+        Some(d) => {
+            state.decisions.insert(r.old_key.clone(), d.clone());
+        }
+        None => {
+            state.decisions.remove(&r.old_key);
+        }
+    }
+    state.save(state_path)
+}

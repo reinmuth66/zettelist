@@ -153,10 +153,51 @@ fn parse_known_url(s: &str) -> Option<String> {
     }
 }
 
+/// 正規化済みの出典 ID から、ブラウザで開く URL を作る。スラッグなど URL にできないものは `None`。
+pub fn source_url(id: &str) -> Option<String> {
+    if let Some(url) = id.strip_prefix("url:") {
+        Some(url.to_string())
+    } else if let Some(doi) = id.strip_prefix("doi:") {
+        Some(format!("https://doi.org/{doi}"))
+    } else if let Some(arxiv) = id.strip_prefix("arxiv:") {
+        Some(format!("https://arxiv.org/abs/{arxiv}"))
+    } else {
+        id.strip_prefix("isbn:")
+            .map(|isbn| format!("https://books.google.com/books?vid=ISBN{isbn}"))
+    }
+}
+
+/// 入力文字列から出典の種類 (`book` / `paper` / `video` / `talk` / `article`) を推測する。
+/// スラッグのときは `None` (登録済みの `kind` を使うため)。
+pub fn kind_hint(input: &str) -> Option<&'static str> {
+    let SourceRef::Id(id) = SourceRef::parse(input) else {
+        return None;
+    };
+    if id.starts_with("isbn:") {
+        return Some("book");
+    }
+    if id.starts_with("doi:") || id.starts_with("arxiv:") {
+        return Some("paper");
+    }
+    if let Some(url) = id.strip_prefix("url:") {
+        let (_, authority, _) = split_url(url);
+        let host = authority.rsplit('@').next().unwrap_or(authority);
+        let host = host.split(':').next().unwrap_or(host);
+        if host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtu.be" {
+            return Some("video");
+        }
+        if host == "speakerdeck.com" || host.ends_with(".speakerdeck.com") {
+            return Some("talk");
+        }
+        return Some("article");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::SourceRef;
     use super::SourceRef::*;
+    use super::{kind_hint, source_url, SourceRef};
 
     #[test]
     fn isbn13_with_hyphens() {
@@ -220,5 +261,25 @@ mod tests {
         assert_eq!(SourceRef::parse("a日本語"), Slug("a日本語".into()));
         assert_eq!(SourceRef::parse("1日本語"), Slug("1日本語".into()));
         assert_eq!(SourceRef::parse("abcd日本"), Slug("abcd日本".into()));
+    }
+    #[test]
+    fn source_url_for_each_id_kind() {
+        assert_eq!(source_url("doi:10.1145/x").as_deref(), Some("https://doi.org/10.1145/x"));
+        assert_eq!(source_url("arxiv:2401.01234").as_deref(), Some("https://arxiv.org/abs/2401.01234"));
+        assert_eq!(
+            source_url("isbn:9784000000000").as_deref(),
+            Some("https://books.google.com/books?vid=ISBN9784000000000")
+        );
+        assert_eq!(source_url("url:https://a.example/b").as_deref(), Some("https://a.example/b"));
+        assert_eq!(source_url("x"), None);
+    }
+    #[test]
+    fn kind_hint_from_input() {
+        assert_eq!(kind_hint("978-4-00-000000-0"), Some("book"));
+        assert_eq!(kind_hint("10.1145/x"), Some("paper"));
+        assert_eq!(kind_hint("https://youtu.be/abc"), Some("video"));
+        assert_eq!(kind_hint("https://speakerdeck.com/a/b"), Some("talk"));
+        assert_eq!(kind_hint("https://a.example/"), Some("article"));
+        assert_eq!(kind_hint("ahrens2017"), None);
     }
 }
