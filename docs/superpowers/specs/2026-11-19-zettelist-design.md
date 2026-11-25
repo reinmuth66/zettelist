@@ -449,6 +449,8 @@ edge Includes: Hub -> Permanent {
 
 削除については次のとおり。ノードを消すと、そのノードにつながるエッジは一緒に消える (`delete Literature` で Cites、`delete Fleeting` で DerivedFrom、`delete Permanent` で Links)。Cites だけを消すことは `@card(1..1)` で拒否される。したがって「Cites を消してから Literature を消す」手順は要らず、ノードの種類ごとに delete だけのクエリを 1 回流せばよい。
 
+main で Permanent や Hub を消しても (Studio で消したときなど)、review にある提案のエッジは消えない。そのまま `branch merge main into review` を流すと `orphan_edge` で衝突し、apply も提案の書き込みも止まる (2026-11-25 に確認)。そこで zl は、main を取り込む前に、main にないノードを端に持つ提案を review から消す。消えた提案と、それに付けた判断は、知らせずに捨てる。
+
 サーバーが止まっているときの終了コードと出力、`query --json` の形は、確認の記録に書いた。zl はエラーを、終了コードではなく `--json` の標準出力の JSON (`request_dispatched`、`http_status`、`code`) で分類する。
 
 ほかに、`omnigraph embed` を使う方法 (埋め込みの方法 b) を選ぶなら、それは別に確かめる。

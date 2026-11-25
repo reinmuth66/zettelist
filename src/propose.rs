@@ -22,12 +22,48 @@ pub struct Proposed {
 
 /// review ブランチがなければ main から作り、あれば main を取り込んで、
 /// 後から main に足された Permanent を review からも見えるようにする。
+///
+/// main から消えた Permanent や Hub (Studio などで消したもの) を端に持つ提案は、
+/// 取り込みが `orphan_edge` で衝突するので、先に review から消す。
 pub fn ensure_review(og: &Omnigraph) -> Result<(), Error> {
     if og.branches()?.iter().any(|b| b == REVIEW) {
+        drop_orphans(og)?;
         og.statement(&format!("branch merge {MAIN} into {REVIEW}"))
     } else {
         og.statement(&format!("branch create {REVIEW} from {MAIN}"))
     }
+}
+
+/// review にあって main にない Permanent と Hub に触れる Links と Includes を、review から消す。
+fn drop_orphans(og: &Omnigraph) -> Result<(), Error> {
+    let slugs = |branch: &str, node: &str| -> Result<HashSet<String>, Error> {
+        let q = format!("query q() {{ match {{ $n: {node} }} return {{ $n.slug as slug }} }}");
+        Ok(og
+            .query(branch, &q, json!({}))?
+            .iter()
+            .filter_map(|r| r.get("slug").and_then(Value::as_str).map(String::from))
+            .collect())
+    };
+    let gone = |node: &str| -> Result<Vec<String>, Error> {
+        let main = slugs(MAIN, node)?;
+        Ok(slugs(REVIEW, node)?.into_iter().filter(|s| !main.contains(s)).collect())
+    };
+    let edges: &[(&str, &[&str])] = &[("Permanent", &["Links", "Includes"]), ("Hub", &["Includes"])];
+    for (node, kinds) in edges {
+        for slug in gone(node)? {
+            for kind in *kinds {
+                for end in ["@src", "@dst"] {
+                    // Includes の @src は Hub、@dst は Permanent
+                    if *kind == "Includes" && ((*node == "Hub") != (end == "@src")) {
+                        continue;
+                    }
+                    let q = format!("query d($s: String) {{ delete {kind} where {end} = $s }}");
+                    og.mutate(REVIEW, &q, json!({"s": slug}))?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// main と review にすでにある Links の、`slug` につながる相手 (どちら向きでも)。

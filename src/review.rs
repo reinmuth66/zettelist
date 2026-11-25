@@ -204,6 +204,18 @@ fn endpoints_exist(p: &Proposal, permanents: &HashSet<String>, hubs: &HashSet<St
     }
 }
 
+/// 鍵 (`link:<from>:<to>` / `hub:<hub>:<note>`) の両端が main にあれば true。
+/// Permanent の slug には `:` が入らないので、最後の `:` で分ける。読めない鍵は残す。
+fn key_endpoints_exist(key: &str, permanents: &HashSet<String>, hubs: &HashSet<String>) -> bool {
+    if let Some((from, to)) = key.strip_prefix("link:").and_then(|r| r.rsplit_once(':')) {
+        permanents.contains(from) && permanents.contains(to)
+    } else if let Some((hub, note)) = key.strip_prefix("hub:").and_then(|r| r.rsplit_once(':')) {
+        hubs.contains(hub) && permanents.contains(note)
+    } else {
+        true
+    }
+}
+
 /// main にある Links と Includes の鍵
 fn main_keys(og: &Omnigraph) -> Result<HashSet<String>, Error> {
     let mut keys: HashSet<String> =
@@ -243,6 +255,8 @@ pub fn apply(og: &Omnigraph, state_path: &Path, queue: &Queue) -> Result<Summary
         for key in &dead {
             decisions.remove(key);
         }
+        // review から提案ごと消えた (ensure_review が片付けた) ものの判断も捨てる
+        decisions.retain(|key, _| key_endpoints_exist(key, &permanents, &hubs));
         reinsert.retain(|p| !matches!(decisions.get(&p.key()), Some(Decision::Reject)));
         for p in &proposals {
             let key = p.key();
