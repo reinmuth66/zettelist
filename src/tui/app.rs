@@ -1,6 +1,7 @@
 use crate::error::Error;
 use crate::notes::{InboxItem, Near, NewNote, Note, NoteKind, SourceSummary};
 use crate::ops::WriteOutcome;
+use crate::queue::Entry;
 use crate::review::{Decision, HubSummary, Proposal, Rehubbed};
 use crate::source_ref::{kind_hint, source_url};
 use crate::tui::draft;
@@ -138,6 +139,10 @@ pub struct App {
     review_reason: Option<LineInput>,
     hub_picker: Option<HubPicker>,
     confirm_merge: bool,
+    failed: Vec<Entry>,
+    failed_cursor: usize,
+    failed_scroll: u16,
+    confirm_discard: Option<String>,
 }
 
 impl App {
@@ -170,6 +175,10 @@ impl App {
             review_reason: None,
             hub_picker: None,
             confirm_merge: false,
+            failed: Vec::new(),
+            failed_cursor: 0,
+            failed_scroll: 0,
+            confirm_discard: None,
         };
         app.reload_inbox();
         app
@@ -247,6 +256,12 @@ impl App {
         }
         self.message = None;
 
+        if self.show_help {
+            self.show_help = false;
+            self.pending_key = None;
+            return None;
+        }
+
         if self.write_form.is_some() {
             self.handle_write_key(key);
             return None;
@@ -270,6 +285,10 @@ impl App {
             self.handle_confirm_merge_key(key);
             return None;
         }
+        if self.confirm_discard.is_some() {
+            self.handle_confirm_discard_key(key);
+            return None;
+        }
 
         let pending = self.pending_key.take();
         match self.settings.keys.resolve(self.screen, pending, key) {
@@ -287,18 +306,8 @@ impl App {
             self.handle_review_action(action);
             return None;
         }
-        if self.screen != Screen::Inbox {
-            match action {
-                Action::Quit | Action::Back => {
-                    self.screen = Screen::Inbox;
-                    self.show_help = false;
-                    self.reload_inbox();
-                }
-                Action::Help => {
-                    self.show_help = !self.show_help;
-                }
-                _ => {}
-            }
+        if self.screen == Screen::Failed {
+            self.handle_failed_action(action);
             return None;
         }
 
@@ -390,6 +399,10 @@ impl App {
             Action::ToFailed => {
                 self.screen = Screen::Failed;
                 self.show_help = false;
+                self.failed_cursor = 0;
+                self.failed_scroll = 0;
+                self.confirm_discard = None;
+                self.reload_failed();
             }
             _ => {}
         }
@@ -487,6 +500,26 @@ impl App {
 
     pub fn confirm_delete_count(&self) -> Option<usize> {
         self.confirm_delete.as_ref().map(Vec::len)
+    }
+
+    pub fn failed(&self) -> &[Entry] {
+        &self.failed
+    }
+
+    pub fn failed_cursor(&self) -> usize {
+        self.failed_cursor
+    }
+
+    pub fn current_failed(&self) -> Option<&Entry> {
+        self.failed.get(self.failed_cursor)
+    }
+
+    pub fn failed_scroll(&self) -> u16 {
+        self.failed_scroll
+    }
+
+    pub fn confirm_discard(&self) -> bool {
+        self.confirm_discard.is_some()
     }
 
     pub fn proposals(&self) -> &[Proposal] {
@@ -1013,6 +1046,116 @@ impl App {
         }
     }
 
+    fn reload_failed(&mut self) {
+        self.failed_scroll = 0;
+        match self.store.failed() {
+            Ok(entries) => {
+                self.failed = entries;
+                self.failed_count = self.failed.len();
+                if self.failed.is_empty() {
+                    self.failed_cursor = 0;
+                } else {
+                    self.failed_cursor = self.failed_cursor.min(self.failed.len() - 1);
+                }
+            }
+            Err(e) => {
+                self.failed.clear();
+                self.failed_cursor = 0;
+                self.record_error(e.to_string());
+            }
+        }
+    }
+
+    fn record_done_warnings(&mut self, queue_warning: Option<String>, worker_warning: Option<String>) {
+        let warnings: Vec<String> = [queue_warning, worker_warning].into_iter().flatten().collect();
+        if !warnings.is_empty() {
+            self.message = Some(warnings.join(" / "));
+        }
+    }
+
+    fn handle_failed_action(&mut self, action: Action) {
+        match action {
+            Action::Quit | Action::Back => {
+                self.screen = Screen::Inbox;
+                self.show_help = false;
+                self.confirm_discard = None;
+                self.reload_inbox();
+            }
+            Action::Help => {
+                self.show_help = !self.show_help;
+            }
+            Action::Down => {
+                if self.failed_cursor + 1 < self.failed.len() {
+                    self.failed_cursor += 1;
+                    self.failed_scroll = 0;
+                }
+            }
+            Action::Up => {
+                if self.failed_cursor > 0 {
+                    self.failed_cursor -= 1;
+                    self.failed_scroll = 0;
+                }
+            }
+            Action::Top => {
+                if !self.failed.is_empty() && self.failed_cursor != 0 {
+                    self.failed_cursor = 0;
+                    self.failed_scroll = 0;
+                }
+            }
+            Action::Bottom => {
+                if !self.failed.is_empty() {
+                    let last = self.failed.len() - 1;
+                    if self.failed_cursor != last {
+                        self.failed_cursor = last;
+                        self.failed_scroll = 0;
+                    }
+                }
+            }
+            Action::ScrollDown => {
+                self.failed_scroll = self.failed_scroll.saturating_add(5);
+            }
+            Action::ScrollUp => {
+                self.failed_scroll = self.failed_scroll.saturating_sub(5);
+            }
+            Action::Retry => {
+                if let Some(entry) = self.failed.get(self.failed_cursor) {
+                    let id = entry.id.clone();
+                    match self.store.retry(&id) {
+                        Ok(done) => self.record_done_warnings(done.queue_warning, done.worker_warning),
+                        Err(e) => self.record_error(e.to_string()),
+                    }
+                    self.reload_failed();
+                }
+            }
+            Action::Discard => {
+                if let Some(entry) = self.failed.get(self.failed_cursor) {
+                    self.pending_key = None;
+                    self.confirm_discard = Some(entry.id.clone());
+                }
+            }
+            Action::RetryAll if !self.failed.is_empty() => {
+                match self.store.retry_all() {
+                    Ok(done) => self.record_done_warnings(done.queue_warning, done.worker_warning),
+                    Err(e) => self.record_error(e.to_string()),
+                }
+                self.reload_failed();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_confirm_discard_key(&mut self, key: KeyEvent) {
+        let Some(id) = self.confirm_discard.take() else {
+            return;
+        };
+        if matches!((key.code, key.modifiers), (KeyCode::Char('y'), KeyModifiers::NONE)) {
+            if let Err(e) = self.store.discard(&id) {
+                self.record_error(e.to_string());
+            }
+            self.reload_failed();
+        }
+    }
+
     fn open_write_form(&mut self) {
         let sources = match self.store.sources() {
             Ok(list) => list,
@@ -1189,6 +1332,12 @@ impl App {
                 ("他".to_string(), "中止"),
             ];
         }
+        if self.confirm_discard.is_some() {
+            return vec![
+                ("y".to_string(), "捨てる"),
+                ("他".to_string(), "中止"),
+            ];
+        }
         if self.screen == Screen::Review {
             let mut pairs: Vec<(Action, &'static str)> = Vec::new();
             if let Some(prop) = self.current_proposal() {
@@ -1256,19 +1405,150 @@ impl App {
                 })
                 .collect();
         }
-        let pairs: &[(Action, &'static str)] = &[
-            (Action::Back, "戻る"),
-            (Action::Help, "ヘルプ"),
-        ];
+        let mut pairs: Vec<(Action, &'static str)> = Vec::new();
+        if !self.failed.is_empty() {
+            pairs.extend([
+                (Action::Retry, "やり直し"),
+                (Action::Discard, "捨てる"),
+                (Action::RetryAll, "全部やり直し"),
+            ]);
+        }
+        pairs.extend([(Action::Back, "戻る"), (Action::Help, "ヘルプ")]);
         pairs
-            .iter()
+            .into_iter()
             .filter_map(|(act, desc)| {
                 self.settings
                     .keys
-                    .label(self.screen, *act)
-                    .map(|k| (k, *desc))
+                    .label(self.screen, act)
+                    .map(|k| (k, desc))
             })
             .collect()
+    }
+
+    pub fn help_keys(&self) -> Vec<(String, &'static str)> {
+        let mut out: Vec<(String, &'static str)> = Vec::new();
+        let label = |act: Action| self.settings.keys.label(self.screen, act);
+
+        match self.screen {
+            Screen::Inbox => {
+                let pairs = [
+                    (
+                        Action::Write,
+                        if self.selected.is_empty() {
+                            "新しいメモを書く"
+                        } else {
+                            "選んだものから Permanent を書く"
+                        },
+                    ),
+                    (Action::Toggle, "選ぶ / 外す"),
+                    (Action::ClearSelection, "選択を全部外す"),
+                ];
+                for (act, desc) in pairs {
+                    if let Some(k) = label(act) {
+                        out.push((k, desc));
+                    }
+                }
+                if !self.inbox.is_empty() {
+                    if let Some(k) = label(Action::Delete) {
+                        out.push((k, "削除 (確認あり)"));
+                    }
+                }
+                for (act, desc) in [
+                    (Action::ToReview, "レビューへ"),
+                    (Action::ToFailed, "失敗の一覧へ"),
+                ] {
+                    if let Some(k) = label(act) {
+                        out.push((k, desc));
+                    }
+                }
+                if self.current_item().is_some_and(|i| {
+                    i.kind == NoteKind::Literature
+                        && i.source_id.as_deref().and_then(source_url).is_some()
+                }) {
+                    if let Some(k) = label(Action::OpenSource) {
+                        out.push((k, "出典の元のページを開く"));
+                    }
+                }
+            }
+            Screen::Review => {
+                if let Some(prop) = self.current_proposal() {
+                    if let Some(k) = label(Action::Adopt) {
+                        out.push((k, "採用して次へ"));
+                    }
+                    if matches!(prop, Proposal::Link { .. }) {
+                        if let Some(k) = label(Action::AdoptWithReason) {
+                            out.push((k, "理由を書いて採用"));
+                        }
+                    }
+                    if let Some(k) = label(Action::Reject) {
+                        out.push((k, "却下して次へ"));
+                    }
+                    if matches!(prop, Proposal::Hub { .. }) {
+                        if let Some(k) = label(Action::Change) {
+                            out.push((k, "別の Hub を選び直す"));
+                        }
+                    }
+                    if let (Some(n), Some(p)) = (label(Action::Next), label(Action::Prev)) {
+                        out.push((format!("{n} / {p}"), "判断せずに次 / 前へ"));
+                    }
+                    if let (Some(u), Some(r)) = (label(Action::Undo), label(Action::Redo)) {
+                        out.push((format!("{u} / {r}"), "直前の判断を取り消す / やり直す"));
+                    }
+                    if let Some(k) = label(Action::Merge) {
+                        out.push((k, "採用したものを main に入れる (確認あり)"));
+                    }
+                }
+                if let Some(k) = label(Action::Back) {
+                    out.push((k, "inbox へ"));
+                }
+            }
+            Screen::Failed => {
+                if !self.failed.is_empty() {
+                    for (act, desc) in [
+                        (Action::Retry, "やり直す"),
+                        (Action::Discard, "捨てる (確認あり)"),
+                        (Action::RetryAll, "全部やり直す"),
+                    ] {
+                        if let Some(k) = label(act) {
+                            out.push((k, desc));
+                        }
+                    }
+                }
+                if let Some(k) = label(Action::Back) {
+                    out.push((k, "inbox へ"));
+                }
+            }
+        }
+
+        if let (Some(d), Some(u)) = (label(Action::Down), label(Action::Up)) {
+            out.push((format!("{d} / {u}"), "下 / 上へ移動"));
+        }
+        if let (Some(t), Some(b)) = (label(Action::Top), label(Action::Bottom)) {
+            out.push((format!("{t} / {b}"), "先頭 / 末尾へ"));
+        }
+        if let (Some(sd), Some(su)) = (label(Action::ScrollDown), label(Action::ScrollUp)) {
+            out.push((format!("{sd} / {su}"), "右の欄を下 / 上に送る"));
+        }
+        if let Some(k) = label(Action::Help) {
+            out.push((k, "キーの一覧"));
+        }
+        if let Some(k) = label(Action::Quit) {
+            let desc = if self.screen == Screen::Inbox {
+                "終了"
+            } else {
+                "inbox に戻る"
+            };
+            out.push((k, desc));
+        }
+
+        out.extend([
+            ("Enter / Esc".to_string(), "保存 / やめる"),
+            ("Tab / Shift-Tab".to_string(), "次 / 前の欄へ"),
+            ("← → Ctrl-a Ctrl-e".to_string(), "カーソル移動、行頭、行末"),
+            ("Ctrl-w / Ctrl-u".to_string(), "1 語消す / 行頭まで消す"),
+        ]);
+
+        out
     }
 }
 
@@ -1938,5 +2218,117 @@ mod tests {
         assert_eq!(app.screen(), Screen::Review);
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.screen(), Screen::Inbox);
+    }
+
+    fn failed_store() -> FakeStore {
+        use crate::queue::{Entry, Job};
+        use std::time::SystemTime;
+
+        let mut store = three_store();
+        store.failed = vec![
+            Entry {
+                id: "100-1".into(),
+                job: Job::Embed {
+                    kind: NoteKind::Fleeting,
+                    slug: "20261117000001".into(),
+                },
+                attempts: 3,
+                not_before: SystemTime::UNIX_EPOCH,
+                last_error: Some("1 回目のエラー\n詳しい理由".into()),
+            },
+            Entry {
+                id: "200-1".into(),
+                job: Job::Promote {
+                    slug: "20261118000001".into(),
+                },
+                attempts: 3,
+                not_before: SystemTime::UNIX_EPOCH,
+                last_error: Some("2 回目のエラー".into()),
+            },
+        ];
+        store
+    }
+
+    #[test]
+    fn f_opens_failed_list() {
+        let mut app = App::new(Box::new(failed_store()), settings());
+        app.on_key(key('f'));
+        assert_eq!(app.screen(), Screen::Failed);
+        assert_eq!(app.failed().len(), 2);
+    }
+
+    #[test]
+    fn enter_retries_and_reloads() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(failed_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('f'));
+        store.borrow_mut().calls.clear();
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let calls = &store.borrow().calls;
+        let retry_pos = calls.iter().position(|c| c == "retry").expect("retry called");
+        let failed_pos = calls.iter().rposition(|c| c == "failed").expect("failed reloaded");
+        assert!(retry_pos < failed_pos);
+        assert_eq!(app.failed().len(), 1);
+    }
+
+    #[test]
+    fn x_asks_then_discards() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(failed_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('f'));
+        store.borrow_mut().calls.clear();
+
+        app.on_key(key('x'));
+        assert!(app.confirm_discard());
+        assert!(!store.borrow().calls.iter().any(|c| c == "discard"));
+
+        app.on_key(key('y'));
+        assert!(!app.confirm_discard());
+        assert!(store.borrow().calls.iter().any(|c| c == "discard"));
+        assert!(store.borrow().calls.iter().any(|c| c == "failed"));
+        assert_eq!(app.failed().len(), 1);
+    }
+
+    #[test]
+    fn capital_r_retries_all() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(failed_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('f'));
+        store.borrow_mut().calls.clear();
+
+        app.on_key(key('R'));
+        let calls = &store.borrow().calls;
+        let all_pos = calls.iter().position(|c| c == "retry_all").expect("retry_all called");
+        let failed_pos = calls.iter().rposition(|c| c == "failed").expect("failed reloaded");
+        assert!(all_pos < failed_pos);
+        assert!(app.failed().is_empty());
+    }
+
+    #[test]
+    fn help_lists_keys_and_closes_on_any_key() {
+        let mut app = App::new(Box::new(three_store()), settings());
+        app.on_key(key('?'));
+        assert!(app.show_help());
+        assert!(!app.help_keys().is_empty());
+
+        let eff = app.on_key(key('q'));
+        assert!(eff.is_none());
+        assert!(!app.show_help());
+
+        app.on_key(key('?'));
+        assert!(app.show_help());
+        let eff2 = app.on_key(key('z'));
+        assert!(eff2.is_none());
+        assert!(!app.show_help());
     }
 }

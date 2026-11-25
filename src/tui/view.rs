@@ -1,4 +1,5 @@
 use crate::notes::NoteKind;
+use crate::queue::Job;
 use crate::review::{Decision, Proposal};
 use crate::tui::app::{App, WriteField, WriteForm};
 use crate::tui::keys::Screen;
@@ -22,6 +23,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let has_confirm = app.confirm_delete_count().is_some();
     let has_reason = app.review_reason().is_some();
     let has_confirm_merge = app.confirm_merge_counts().is_some();
+    let has_confirm_discard = app.confirm_discard();
     let has_msg = app.message().is_some();
     let mut constraints = vec![Constraint::Length(1), Constraint::Min(0)];
     if has_write {
@@ -39,6 +41,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if has_confirm_merge {
         constraints.push(Constraint::Length(1));
     }
+    if has_confirm_discard {
+        constraints.push(Constraint::Length(1));
+    }
     if has_msg {
         constraints.push(Constraint::Length(1));
     }
@@ -53,7 +58,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match app.screen() {
         Screen::Inbox => draw_inbox(frame, app, main_area),
         Screen::Review => draw_review(frame, app, main_area),
-        Screen::Failed => draw_placeholder(frame, app, main_area, "失敗の一覧 (Esc または q で戻る)"),
+        Screen::Failed => draw_failed(frame, app, main_area),
     }
 
     let mut idx = 2;
@@ -80,6 +85,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
             "採用 {adopted} 件、却下 {rejected} 件を main に入れます。よろしいですか [y/N]"
         ))
         .style(Style::default().fg(app.settings().theme.error));
+        frame.render_widget(p, chunks[idx]);
+        idx += 1;
+    }
+    if has_confirm_discard {
+        let p = Paragraph::new("この失敗を捨てます。よろしいですか [y/N]")
+            .style(Style::default().fg(app.settings().theme.error));
         frame.render_widget(p, chunks[idx]);
         idx += 1;
     }
@@ -625,21 +636,152 @@ fn draw_promote_title(frame: &mut Frame, app: &App, area: Rect) {
     frame.set_cursor_position((cx, inner.y));
 }
 
+fn draw_failed(frame: &mut Frame, app: &App, area: Rect) {
+    if area.width < 80 {
+        draw_failed_list(frame, app, area);
+    } else {
+        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+        draw_failed_list(frame, app, cols[0]);
+        draw_failed_detail(frame, app, cols[1]);
+    }
+}
+
+fn draw_failed_list(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.settings().theme;
+    let block = Block::bordered();
+
+    if app.failed().is_empty() {
+        let empty = Paragraph::new("失敗したジョブはありません")
+            .style(Style::default().fg(theme.dim))
+            .block(block);
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let items: Vec<ListItem> = app
+        .failed()
+        .iter()
+        .enumerate()
+        .map(|(idx, entry)| {
+            let is_cur = idx == app.failed_cursor();
+            let cursor_str = if is_cur { "> " } else { "  " };
+            let name = entry.job.name();
+            let attempts_str = format!("{}回", entry.attempts);
+            let first_err = entry
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("");
+            let prefix_w = cursor_str.width() + name.width() + 1 + attempts_str.width() + 1;
+            let err_w = inner_w.saturating_sub(prefix_w);
+            let err_disp = truncate(first_err, err_w);
+
+            let name_style = if is_cur {
+                Style::default().fg(theme.cursor).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let spans = vec![
+                Span::styled(cursor_str, name_style),
+                Span::styled(name, name_style),
+                Span::raw(" "),
+                Span::styled(attempts_str, Style::default().fg(theme.dim)),
+                Span::raw(" "),
+                Span::raw(err_disp),
+            ];
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let list = List::new(items).block(block);
+    let mut state = ListState::default();
+    state.select(Some(app.failed_cursor()));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn job_summary(job: &Job) -> String {
+    match job {
+        Job::WriteNote(note) => note.body.lines().next().unwrap_or("").to_string(),
+        Job::Embed { kind, slug } => {
+            let kind_str = match kind {
+                NoteKind::Fleeting => "Fleeting",
+                NoteKind::Literature => "Literature",
+                NoteKind::Permanent => "Permanent",
+            };
+            format!("{kind_str} {slug}")
+        }
+        Job::Promote { slug } => slug.clone(),
+        Job::Backup { message } => message.clone(),
+    }
+}
+
+fn draw_failed_detail(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.settings().theme;
+    let block = Block::bordered();
+
+    let Some(entry) = app.current_failed() else {
+        frame.render_widget(block, area);
+        return;
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "エラー",
+        Style::default().fg(theme.header).add_modifier(Modifier::BOLD),
+    )));
+    let err_text = entry.last_error.as_deref().unwrap_or("(なし)");
+    for l in err_text.lines() {
+        lines.push(Line::from(l.to_string()));
+    }
+    if err_text.is_empty() {
+        lines.push(Line::from("(なし)"));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "ジョブ",
+        Style::default().fg(theme.header).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(format!("{} ({} 回)", entry.job.name(), entry.attempts)));
+    lines.push(Line::from(job_summary(&entry.job)));
+
+    let detail = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.failed_scroll(), 0));
+    frame.render_widget(detail, area);
+}
+
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
-    let w = area.width.min(50);
-    let h = area.height.min(12);
+    let keys = app.help_keys();
+    let key_w = keys.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
+    let lines: Vec<Line> = keys
+        .into_iter()
+        .map(|(k, desc)| {
+            let pad = " ".repeat(key_w.saturating_sub(k.width()) + 2);
+            Line::from(format!("  {k}{pad}{desc}"))
+        })
+        .collect();
+
+    let max_line_w = lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16;
+    let title = "キー操作 (どのキーでも閉じる)";
+    let w = max_line_w
+        .max(title.width() as u16)
+        .saturating_add(4)
+        .min(area.width);
+    let h = (lines.len() as u16).saturating_add(2).min(area.height);
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
     let popup = Rect::new(x, y, w, h);
 
-    let mut lines = vec![Line::from("キー操作 (? で閉じる)")];
-    for (k, desc) in app.usable_keys() {
-        lines.push(Line::from(format!("  {k}: {desc}")));
-    }
-    lines.push(Line::from("  j/k/↑/↓: 移動  gg/G: 先頭/末尾  Ctrl-d/u: 本文送り"));
-
     frame.render_widget(Clear, popup);
-    frame.render_widget(Paragraph::new(lines).block(Block::bordered()), popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(title)),
+        popup,
+    );
 }
 
 #[cfg(test)]
@@ -873,5 +1015,40 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         let screen = render(&app, 100, 20);
         assert!(screen.contains("提案はありません"), "{screen}");
+    }
+
+    #[test]
+    fn failed_list_shows_job_and_error() {
+        use crate::queue::{Entry, Job};
+        use std::time::SystemTime;
+
+        let store = FakeStore {
+            failed: vec![Entry {
+                id: "100-1".into(),
+                job: Job::Embed {
+                    kind: NoteKind::Fleeting,
+                    slug: "20261117000001".into(),
+                },
+                attempts: 3,
+                not_before: SystemTime::UNIX_EPOCH,
+                last_error: Some("1 回目のエラー\n詳細".into()),
+            }],
+            ..Default::default()
+        };
+        let mut app = App::new(Box::new(store), settings());
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        let screen = render(&app, 100, 20);
+        assert!(screen.contains("embed"), "{screen}");
+        assert!(screen.contains("1 回目のエラー"), "{screen}");
+    }
+
+    #[test]
+    fn help_on_review_lists_review_keys() {
+        let mut app = App::new(Box::new(review_store()), settings());
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let screen = render(&app, 100, 20);
+        assert!(screen.contains("理由を書いて採用"), "{screen}");
+        assert!(screen.contains("A"), "{screen}");
     }
 }
