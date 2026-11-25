@@ -5,8 +5,8 @@ use common::{unit, TestServer};
 use serde_json::{json, Value};
 use zettelist::error::Error;
 use zettelist::notes::{
-    delete_notes, get_embedding, inbox, nearest, note_text, promote, set_embedding, write_note, InboxItem, NewNote,
-    NoteKind,
+    delete_notes, get_embedding, inbox, inbox_embeddings, nearest, note_text, promote, set_embedding,
+    sources as list_sources, write_note, InboxItem, NewNote, NoteKind, SourceSummary,
 };
 use zettelist::omnigraph::Omnigraph;
 
@@ -520,4 +520,42 @@ fn note_text_by_kind() {
     assert_eq!(note_text(&og, NoteKind::Fleeting, &f.slug).unwrap().as_deref(), Some("メモの本文"));
     assert_eq!(note_text(&og, NoteKind::Permanent, &p).unwrap().as_deref(), Some("題名\n本文"));
     assert_eq!(note_text(&og, NoteKind::Permanent, "nothing").unwrap(), None);
+}
+
+#[test]
+fn inbox_embeddings_skip_promoted_and_unembedded() {
+    let s = TestServer::start();
+    let og = s.og();
+    let f1 = write_note(&og, &note("埋め込みあり", None, None, at(10, 0))).unwrap();
+    let _f2 = write_note(&og, &note("埋め込みなし", None, None, at(10, 1))).unwrap();
+    let f3 = write_note(&og, &note("昇格済み", None, None, at(10, 2))).unwrap();
+    let v1 = unit(&[(0, 1.0)]);
+    let v3 = unit(&[(1, 1.0)]);
+    set_embedding(&og, NoteKind::Fleeting, &f1.slug, &v1).unwrap();
+    set_embedding(&og, NoteKind::Fleeting, &f3.slug, &v3).unwrap();
+    promote(&og, &[(NoteKind::Fleeting, f3.slug)], "題", "本文", at(11, 0)).unwrap();
+
+    let got = inbox_embeddings(&og).unwrap();
+    assert_eq!(got.len(), 1);
+    let got_v1 = got.get(&(NoteKind::Fleeting, f1.slug)).unwrap();
+    assert_eq!(got_v1.len(), 1024);
+    assert!(got_v1.iter().zip(&v1).all(|(x, y)| (x - y).abs() < 1e-6));
+}
+
+#[test]
+fn sources_list_registered_slugs_only() {
+    let s = TestServer::start();
+    let og = s.og();
+    og.load(
+        "main",
+        &[json!({"type":"Source","data":{"id":"isbn:1","slug":"ahrens2017","title":"S","kind":"book","input":"x","provenance":"{}"}})],
+    )
+    .unwrap();
+    // 仮の Source (slug 空) を作る
+    write_note(&og, &note("引用", Some("978-4-480-06899-8"), None, at_ten())).unwrap();
+
+    assert_eq!(
+        list_sources(&og).unwrap(),
+        vec![SourceSummary { slug: "ahrens2017".to_string(), kind: "book".to_string() }]
+    );
 }

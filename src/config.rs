@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub omnigraph: OmnigraphConfig,
@@ -13,6 +13,22 @@ pub struct Config {
     pub embed: EmbedConfig,
     pub link: LinkConfig,
     pub ui: UiConfig,
+    pub theme: toml::Value,
+    pub keys: toml::Value,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            omnigraph: OmnigraphConfig::default(),
+            backup: BackupConfig::default(),
+            embed: EmbedConfig::default(),
+            link: LinkConfig::default(),
+            ui: UiConfig::default(),
+            theme: toml::Value::Table(toml::map::Map::new()),
+            keys: toml::Value::Table(toml::map::Map::new()),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,8 +184,37 @@ mod tests {
     }
 
     #[test]
-    fn unknown_sections_are_ignored() {
-        assert!(Config::from_toml_str("[theme]\nx = \"red\"\n[keys]\ny = \"z\"\n", Path::new("/h")).is_ok());
+    fn unknown_tables_are_ignored() {
+        assert!(Config::from_toml_str("[unknown]\nx = 1\n", Path::new("/h")).is_ok());
+    }
+
+    #[test]
+    fn theme_and_keys_are_read() {
+        let c = Config::from_toml_str(
+            "[theme]\nsimilar = \"red\"\n[keys.inbox]\ndelete = [\"D\"]\n",
+            Path::new("/h"),
+        )
+        .unwrap();
+        assert_eq!(c.theme.get("similar").and_then(|v| v.as_str()), Some("red"));
+        assert_eq!(
+            c.keys
+                .get("inbox")
+                .and_then(|m| m.get("delete"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>()),
+            Some(vec!["D"])
+        );
+    }
+
+    #[test]
+    fn theme_and_keys_accept_any_shape() {
+        for toml in [
+            "theme = \"red\"\nkeys = 123\n",
+            "[theme]\nsimilar = 42\n[keys.inbox]\ndown = \"j\"\n",
+            "[keys]\ninbox = [\"bad\"]\n",
+        ] {
+            assert!(Config::from_toml_str(toml, Path::new("/h")).is_ok(), "toml: {toml}");
+        }
     }
 
     #[test]

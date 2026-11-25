@@ -5,16 +5,15 @@
 
 use crate::backup::{self, Outcome};
 use crate::error::Error;
-use crate::notes::{get_embedding, inbox, nearest, show_note, write_note, NewNote, Near, NoteKind};
-use crate::queue::Job;
-use crate::review::{apply, decide, list_proposals, Decision, Proposal, ReviewState};
-use crate::worker::{reembed_all, run_worker, run_worker_once, spawn_worker};
+use crate::notes::{inbox, show_note, NewNote, NoteKind};
+use crate::ops::{self, Similar, WriteOutcome};
+use crate::review::{decide, list_proposals, Decision, Proposal, ReviewState};
+use crate::worker::{reembed_all, run_worker, run_worker_once};
 use crate::Ctx;
 use chrono::{DateTime, Local, SecondsFormat, Utc};
 use clap::error::ErrorKind;
 use clap::{ArgGroup, Parser};
 use serde_json::json;
-use std::collections::HashSet;
 use std::process::ExitCode;
 
 /// Zettelkasten on Omnigraph の書き込みと整理の道具
@@ -289,13 +288,17 @@ fn fail(json: bool, e: &Error) -> ExitCode {
 fn dispatch(json: bool, action: Action) -> Result<(), Error> {
     match action {
         Action::Tui => {
+            use std::io::IsTerminal;
             if json {
                 return Err(Error::Invalid(
-                    "TUI はまだありません。操作は --inbox などのオプションで行います".into(),
+                    "--json では TUI を起動できません。操作のオプションか本文を渡します".into(),
                 ));
             }
-            println!("TUI はまだありません");
-            Ok(())
+            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                return Err(Error::Invalid("TUI は端末で起動します".into()));
+            }
+            let ctx = Ctx::from_env()?;
+            crate::tui::run(ctx)
         }
         Action::Backup => backup_now(json),
         Action::Worker { once } => {
@@ -305,7 +308,7 @@ fn dispatch(json: bool, action: Action) -> Result<(), Error> {
         Action::Reembed => {
             let ctx = Ctx::from_env()?;
             let count = reembed_all(&ctx)?;
-            start_worker(&ctx);
+            warn_worker(ops::start_worker(&ctx));
             output(json, json!({"count": count}), &format!("{count} 件の埋め込みを積みました"));
             Ok(())
         }
@@ -442,18 +445,16 @@ fn promote_notes(json: bool, slugs: &str, title: &str, body: BodySource) -> Resu
     };
     let ctx = Ctx::from_env()?;
     let from = resolve_kinds(&ctx, &slugs)?;
-    let slug = crate::notes::promote(&ctx.og, &from, title, &body, Local::now())?;
-    // 昇格は済んでいるので、後処理の失敗では終了コードを変えない
-    if let Err(e) = ctx.queue.push(Job::Promote { slug: slug.clone() }) {
-        let message = format!("昇格しましたが、リンク提案を待ち行列に積めませんでした: {e}");
+    let done = ops::promote(&ctx, &from, title, &body)?;
+    if let Some(message) = done.queue_warning {
         if json {
-            eprintln!("{}", json!({"warning": message, "slug": slug}));
+            eprintln!("{}", json!({"warning": message, "slug": done.value}));
         } else {
             eprintln!("{message}");
         }
     }
-    start_worker(&ctx);
-    output(json, json!({"slug": slug}), &format!("昇格しました {slug}"));
+    warn_worker(done.worker_warning);
+    output(json, json!({"slug": done.value}), &format!("昇格しました {}", done.value));
     Ok(())
 }
 
@@ -539,25 +540,14 @@ fn merge(json: bool, yes: bool) -> Result<(), Error> {
         return Err(Error::Invalid("マージするには --yes が要ります".to_string()));
     }
     let ctx = Ctx::from_env()?;
-    // apply が review.lock を自分で取る。ここでは持たない
-    let summary = apply(&ctx.og, &ctx.paths.review_json(), &ctx.queue)?;
-    start_worker(&ctx);
+    let done = ops::merge(&ctx)?;
+    warn_worker(done.worker_warning);
     output(
         json,
-        json!({"links": summary.links, "hubs": summary.hubs}),
-        &format!("マージしました (リンク {} 本、ハブ {} 件)", summary.links, summary.hubs),
+        json!({"links": done.value.links, "hubs": done.value.hubs}),
+        &format!("マージしました (リンク {} 本、ハブ {} 件)", done.value.links, done.value.hubs),
     );
     Ok(())
-}
-
-/// JSON と一覧に出す、ジョブの種類の名前。
-fn job_name(job: &Job) -> &'static str {
-    match job {
-        Job::WriteNote(_) => "write_note",
-        Job::Embed { .. } => "embed",
-        Job::Promote { .. } => "promote",
-        Job::Backup { .. } => "backup",
-    }
 }
 
 /// `--failed`
@@ -566,7 +556,7 @@ fn failed_list(json: bool) -> Result<(), Error> {
     let entries = ctx.queue.failed()?;
     let value: Vec<_> = entries
         .iter()
-        .map(|e| json!({"id": e.id, "job": job_name(&e.job), "attempts": e.attempts, "last_error": e.last_error}))
+        .map(|e| json!({"id": e.id, "job": e.job.name(), "attempts": e.attempts, "last_error": e.last_error}))
         .collect();
     let human = if entries.is_empty() {
         "失敗したジョブはありません".to_string()
@@ -575,7 +565,7 @@ fn failed_list(json: bool) -> Result<(), Error> {
             .iter()
             .map(|e| {
                 let error = e.last_error.as_deref().map(one_line).unwrap_or_default();
-                format!("{}  {}  {} 回  {error}", e.id, job_name(&e.job), e.attempts)
+                format!("{}  {}  {} 回  {error}", e.id, e.job.name(), e.attempts)
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -587,8 +577,8 @@ fn failed_list(json: bool) -> Result<(), Error> {
 /// `--retry <id>`
 fn retry(json: bool, id: &str) -> Result<(), Error> {
     let ctx = Ctx::from_env()?;
-    ctx.queue.retry_failed(id)?;
-    start_worker(&ctx);
+    let done = ops::retry(&ctx, id)?;
+    warn_worker(done.worker_warning);
     output(json, json!({"ok": true}), &format!("やり直しを積みました {id}"));
     Ok(())
 }
@@ -596,10 +586,9 @@ fn retry(json: bool, id: &str) -> Result<(), Error> {
 /// `--retry-all`
 fn retry_all(json: bool) -> Result<(), Error> {
     let ctx = Ctx::from_env()?;
-    let count = ctx.queue.failed()?.len();
-    ctx.queue.retry_all_failed()?;
-    start_worker(&ctx);
-    output(json, json!({"ok": true}), &format!("{count} 件のやり直しを積みました"));
+    let done = ops::retry_all(&ctx)?;
+    warn_worker(done.worker_warning);
+    output(json, json!({"ok": true}), &format!("{} 件のやり直しを積みました", done.value));
     Ok(())
 }
 
@@ -621,55 +610,10 @@ fn skill_export(json: bool, dir: &str, force: bool) -> Result<(), Error> {
     Ok(())
 }
 
-/// inbox に出す近いノートの上限
-const SIMILAR_INBOX: usize = 10;
-/// Permanent に出す近いノートの上限
-const SIMILAR_PERMANENT: usize = 3;
-
-/// その種類のノートの件数。
-fn count_notes(og: &crate::omnigraph::Omnigraph, kind: NoteKind) -> Result<usize, Error> {
-    let q = format!("query q() {{ match {{ $n: {} }} return {{ $n.slug as slug }} }}", kind_type(kind));
-    Ok(og.query("main", &q, json!({}))?.len())
-}
-
-fn kind_type(kind: NoteKind) -> &'static str {
-    match kind {
-        NoteKind::Fleeting => "Fleeting",
-        NoteKind::Literature => "Literature",
-        NoteKind::Permanent => "Permanent",
-    }
-}
-
 /// `--similar <slug>`
 fn similar(json: bool, slug: &str) -> Result<(), Error> {
     let ctx = Ctx::from_env()?;
-    let me = show_note(&ctx.og, slug)?;
-    let min = ctx.config.link.inbox_similarity;
-    let (inbox_near, permanent_near) = match get_embedding(&ctx.og, me.kind, &me.slug)? {
-        // 埋め込みがまだなら、どちらも空
-        None => (Vec::new(), Vec::new()),
-        Some(v) => {
-            // 自分が上位に入りうるので、1 件多く引いてから自分を除く
-            let not_me = |n: &Near| !(n.kind == me.kind && n.slug == me.slug);
-            // inbox は昇格していないものだけ。`nearest` は昇格を見ないので、inbox の組に絞る。
-            // 昇格済みが上位を埋めて本物の inbox を押し出さないよう、Fleeting と Literature の全件まで引く。
-            let members: HashSet<(&str, String)> =
-                inbox(&ctx.og)?.into_iter().map(|i| (kind_name(i.kind), i.slug)).collect();
-            let mut inbox_near = if members.is_empty() {
-                Vec::new()
-            } else {
-                let all = count_notes(&ctx.og, NoteKind::Fleeting)? + count_notes(&ctx.og, NoteKind::Literature)?;
-                nearest(&ctx.og, "main", &[NoteKind::Fleeting, NoteKind::Literature], &v, all.max(members.len() + 1), min)?
-            };
-            inbox_near.retain(|n| members.contains(&(kind_name(n.kind), n.slug.clone())));
-            inbox_near.retain(not_me);
-            inbox_near.truncate(SIMILAR_INBOX);
-            let mut permanent_near = nearest(&ctx.og, "main", &[NoteKind::Permanent], &v, SIMILAR_PERMANENT + 1, min)?;
-            permanent_near.retain(not_me);
-            permanent_near.truncate(SIMILAR_PERMANENT);
-            (inbox_near, permanent_near)
-        }
-    };
+    let Similar { inbox: inbox_near, permanent: permanent_near } = ops::similar(&ctx, slug)?;
     let value = json!({
         "inbox": inbox_near.iter().map(|n| json!({
             "kind": kind_name(n.kind),
@@ -729,35 +673,28 @@ fn backup_now(json: bool) -> Result<(), Error> {
 /// `zl "<本文>"`
 fn write(json: bool, note: NewNote) -> Result<(), Error> {
     let ctx = Ctx::from_env()?;
-    match write_note(&ctx.og, &note) {
-        Ok(written) => {
-            // 保存は済んでいるので、後処理の失敗では終了コードを変えない
-            if let Err(e) = ctx.queue.push(Job::Embed { kind: written.kind, slug: written.slug.clone() }) {
-                eprintln!("埋め込みの登録に失敗しました: {e}");
-            }
-            start_worker(&ctx);
-            output(json, json!({"slug": written.slug}), &format!("保存しました {}", written.slug));
-            Ok(())
+    let done = ops::write(&ctx, note)?;
+    if let Some(w) = done.queue_warning {
+        eprintln!("{w}");
+    }
+    warn_worker(done.worker_warning);
+    match done.value {
+        WriteOutcome::Saved(slug) => {
+            output(json, json!({"slug": slug}), &format!("保存しました {slug}"));
         }
-        // 入力の誤りは直してもらう。積んでも通らない
-        Err(e @ Error::Invalid(_)) => Err(e),
-        // それ以外は、サーバー側の拒否でもメモを失わないよう、待ち行列に残す
-        Err(e) => {
-            ctx.queue.push(Job::WriteNote(note))?;
-            start_worker(&ctx);
+        WriteOutcome::Queued(e) => {
             let human = match e {
                 Error::Transient(_) => "omnigraph-server に届かないので待ち行列に保存しました".to_string(),
                 _ => format!("書き込めなかったので待ち行列に保存しました: {e}"),
             };
             output(json, json!({"queued": true}), &human);
-            Ok(())
         }
     }
+    Ok(())
 }
 
-/// worker の起動に失敗しても、保存は済んでいるので警告だけにする
-fn start_worker(ctx: &Ctx) {
-    if let Err(e) = spawn_worker(&ctx.paths) {
-        eprintln!("worker を起動できません: {e}");
+fn warn_worker(warning: Option<String>) {
+    if let Some(w) = warning {
+        eprintln!("{w}");
     }
 }

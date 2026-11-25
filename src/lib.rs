@@ -5,12 +5,14 @@ pub mod embed;
 pub mod error;
 pub mod notes;
 pub mod omnigraph;
+pub mod ops;
 pub mod paths;
 pub mod propose;
 pub mod queue;
 pub mod review;
 pub mod skill;
 pub mod source_ref;
+pub mod tui;
 pub mod worker;
 
 use config::Config;

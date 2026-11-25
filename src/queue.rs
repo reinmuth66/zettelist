@@ -19,6 +19,18 @@ pub enum Job {
     Backup { message: String },
 }
 
+impl Job {
+    /// JSON と一覧に出す、ジョブの種類の名前。
+    pub fn name(&self) -> &'static str {
+        match self {
+            Job::WriteNote(_) => "write_note",
+            Job::Embed { .. } => "embed",
+            Job::Promote { .. } => "promote",
+            Job::Backup { .. } => "backup",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Entry {
     pub id: String,

@@ -9,7 +9,7 @@ use zettelist::notes::{promote, write_note, NewNote, NoteKind};
 use zettelist::omnigraph::Omnigraph;
 use zettelist::propose::ensure_review;
 use zettelist::queue::{Job, Queue};
-use zettelist::review::{apply, list_proposals, Decision, Proposal, ReviewState, Summary};
+use zettelist::review::{apply, hubs, list_proposals, rehub, unrehub, Decision, HubSummary, Proposal, ReviewState, Summary};
 
 fn at(h: u32, m: u32) -> DateTime<Local> {
     Local.with_ymd_and_hms(2026, 11, 20, h, m, 0).unwrap()
@@ -535,4 +535,159 @@ fn apply_survives_permanent_recreated_with_same_slug() {
     let summary = apply(&og, &state_path(&s), &queue).unwrap();
     assert_eq!(summary, Summary { links: 1, hubs: 0 });
     assert_eq!(links(&og, "main"), [(a, c, None)]);
+}
+
+#[test]
+fn rehub_adopts_new_hub_and_rejects_old() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let p = permanent(&og, "P", 0);
+    og.load(
+        "main",
+        &[
+            json!({"type":"Hub","data":{"slug":"h1","title":"ハブ 1"}}),
+            json!({"type":"Hub","data":{"slug":"h2","title":"ハブ 2"}}),
+        ],
+    )
+    .unwrap();
+    propose_hub(&og, "h1", &p);
+
+    let path = state_path(&s);
+    let lock = path.with_file_name("review.lock");
+    let old_key = format!("hub:h1:{p}");
+    let new_key = format!("hub:h2:{p}");
+    let r = rehub(&og, &path, &lock, &old_key, "h2").unwrap();
+    assert!(r.created);
+    assert_eq!(r.old_key, old_key);
+    assert_eq!(r.new_key, new_key);
+    assert_eq!(r.previous, None);
+
+    let props = list_proposals(&og).unwrap();
+    assert!(props.iter().any(|x| x.key() == new_key), "{props:?}");
+    let st = ReviewState::load(&path).unwrap();
+    assert_eq!(st.decisions.get(&old_key), Some(&Decision::Reject));
+    assert_eq!(st.decisions.get(&new_key), Some(&Decision::Adopt { reason: None }));
+
+    apply(&og, &path, &queue).unwrap();
+    assert_eq!(includes(&og, "main"), vec![("h2".to_string(), p)]);
+}
+
+#[test]
+fn unrehub_restores_previous_state() {
+    let s = TestServer::start();
+    let og = s.og();
+    let p = permanent(&og, "P", 0);
+    og.load(
+        "main",
+        &[
+            json!({"type":"Hub","data":{"slug":"h1","title":"ハブ 1"}}),
+            json!({"type":"Hub","data":{"slug":"h2","title":"ハブ 2"}}),
+        ],
+    )
+    .unwrap();
+    let prop = propose_hub(&og, "h1", &p);
+    let path = state_path(&s);
+    let lock = path.with_file_name("review.lock");
+    save_decisions(&path, vec![(&prop, adopt())]);
+    let before = ReviewState::load(&path).unwrap();
+
+    let r = rehub(&og, &path, &lock, &prop.key(), "h2").unwrap();
+    assert_eq!(r.previous, Some(adopt()));
+    unrehub(&og, &path, &lock, &r).unwrap();
+
+    let props = list_proposals(&og).unwrap();
+    assert!(!props.iter().any(|x| x.key() == format!("hub:h2:{p}")), "{props:?}");
+    assert_eq!(ReviewState::load(&path).unwrap(), before);
+}
+
+#[test]
+fn unrehub_restores_rejected_existing_destination() {
+    let s = TestServer::start();
+    let og = s.og();
+    let p = permanent(&og, "P", 0);
+    og.load(
+        "main",
+        &[
+            json!({"type":"Hub","data":{"slug":"h1","title":"ハブ 1"}}),
+            json!({"type":"Hub","data":{"slug":"h2","title":"ハブ 2"}}),
+        ],
+    )
+    .unwrap();
+    let p1 = propose_hub(&og, "h1", &p);
+    let p2 = propose_hub(&og, "h2", &p);
+    let path = state_path(&s);
+    let lock = path.with_file_name("review.lock");
+    save_decisions(&path, vec![(&p2, Decision::Reject)]);
+    let before = ReviewState::load(&path).unwrap();
+
+    let r = rehub(&og, &path, &lock, &p1.key(), "h2").unwrap();
+    assert!(!r.created);
+    assert_eq!(r.new_previous, Some(Decision::Reject));
+    unrehub(&og, &path, &lock, &r).unwrap();
+
+    assert_eq!(ReviewState::load(&path).unwrap(), before);
+}
+
+#[test]
+fn unrehub_deletes_created_proposal_when_hub_slug_has_colon() {
+    let s = TestServer::start();
+    let og = s.og();
+    let p = permanent(&og, "P", 0);
+    og.load(
+        "main",
+        &[
+            json!({"type":"Hub","data":{"slug":"h1","title":"ハブ 1"}}),
+            json!({"type":"Hub","data":{"slug":"h:2","title":"ハブ 2"}}),
+        ],
+    )
+    .unwrap();
+    let prop = propose_hub(&og, "h1", &p);
+    let path = state_path(&s);
+    let lock = path.with_file_name("review.lock");
+
+    let r = rehub(&og, &path, &lock, &prop.key(), "h:2").unwrap();
+    assert!(r.created);
+    unrehub(&og, &path, &lock, &r).unwrap();
+
+    let props = list_proposals(&og).unwrap();
+    assert!(!props.iter().any(|x| x.key() == format!("hub:h:2:{p}")), "{props:?}");
+}
+
+#[test]
+fn rehub_rejects_unknown_hub_and_same_hub() {
+    let s = TestServer::start();
+    let og = s.og();
+    let p = permanent(&og, "P", 0);
+    og.load("main", &[json!({"type":"Hub","data":{"slug":"h1","title":"ハブ 1"}})]).unwrap();
+    let prop = propose_hub(&og, "h1", &p);
+    let path = state_path(&s);
+    let lock = path.with_file_name("review.lock");
+
+    for bad in ["nosuch", "h1"] {
+        let e = rehub(&og, &path, &lock, &prop.key(), bad).unwrap_err();
+        assert!(matches!(e, zettelist::error::Error::Invalid(_)), "{bad}: {e:?}");
+        assert_eq!(ReviewState::load(&path).unwrap(), ReviewState::default());
+    }
+}
+
+#[test]
+fn hubs_are_sorted_by_title() {
+    let s = TestServer::start();
+    let og = s.og();
+    og.load(
+        "main",
+        &[
+            json!({"type":"Hub","data":{"slug":"h-b","title":"B ハブ"}}),
+            json!({"type":"Hub","data":{"slug":"h-a","title":"A ハブ"}}),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        hubs(&og).unwrap(),
+        vec![
+            HubSummary { slug: "h-a".to_string(), title: "A ハブ".to_string() },
+            HubSummary { slug: "h-b".to_string(), title: "B ハブ".to_string() },
+        ]
+    );
 }

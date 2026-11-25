@@ -63,12 +63,12 @@ fn dash_body_after_double_dash() {
 }
 
 #[test]
-fn no_body_shows_tui_notice() {
+fn no_body_without_terminal_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let output = zl(dir.path()).output().unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("TUI はまだありません"), "stdout: {stdout}");
+    assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("TUI は端末で起動します"), "stderr: {stderr}");
 }
 
 #[test]

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NoteKind {
     Fleeting,
     Literature,
@@ -24,6 +24,7 @@ use crate::paths::lock_file;
 use crate::source_ref::SourceRef;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 
 const BRANCH: &str = "main";
 
@@ -248,6 +249,59 @@ pub fn inbox(og: &Omnigraph) -> Result<Vec<InboxItem>, Error> {
     }
     items.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.slug.cmp(&b.slug)));
     Ok(items)
+}
+
+/// inbox (昇格していない Fleeting と Literature) のうち、埋め込みのあるものを返す。
+pub fn inbox_embeddings(og: &Omnigraph) -> Result<HashMap<(NoteKind, String), Vec<f32>>, Error> {
+    let queries = [
+        (
+            NoteKind::Fleeting,
+            "query q() { match { $n: Fleeting not { $p: Permanent $p derivedFrom $n } } \
+             return { $n.slug as slug, $n.embedding as embedding } }",
+        ),
+        (
+            NoteKind::Literature,
+            "query q() { match { $n: Literature not { $p: Permanent $p derivedFromLit $n } } \
+             return { $n.slug as slug, $n.embedding as embedding } }",
+        ),
+    ];
+    let mut out = HashMap::new();
+    for (kind, q) in queries {
+        for r in og.query(BRANCH, q, json!({}))? {
+            let Some(value) = r.get("embedding").filter(|v| !v.is_null()) else {
+                continue;
+            };
+            let slug = text(&r, "slug").ok_or_else(|| Error::Permanent(format!("slug がありません: {r:?}")))?;
+            out.insert((kind, slug), parse_vector(value)?);
+        }
+    }
+    Ok(out)
+}
+
+/// 登録済みの出典の概要。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSummary {
+    pub slug: String,
+    pub kind: String,
+}
+
+/// slug が空でない Source を slug の順に返す。
+pub fn sources(og: &Omnigraph) -> Result<Vec<SourceSummary>, Error> {
+    let rows = og.query(
+        BRANCH,
+        "query q() { match { $s: Source } return { $s.slug as slug, $s.kind as kind } }",
+        json!({}),
+    )?;
+    let mut list: Vec<SourceSummary> = rows
+        .iter()
+        .filter_map(|r| {
+            let slug = text(r, "slug")?;
+            let kind = text(r, "kind").unwrap_or_default();
+            Some(SourceSummary { slug, kind })
+        })
+        .collect();
+    list.sort_by(|a, b| a.slug.cmp(&b.slug));
+    Ok(list)
 }
 
 /// 元のノートから Permanent を 1 件作り、DerivedFrom / DerivedFromLit を同じ load で張る。
