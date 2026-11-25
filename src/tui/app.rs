@@ -11,7 +11,20 @@ use crate::tui::store::Store;
 use crate::tui::theme::Theme;
 use chrono::{DateTime, Local, Utc};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageKind {
+    Info,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Message {
+    kind: MessageKind,
+    text: String,
+}
 
 pub struct Settings {
     pub inbox_similarity: f32,
@@ -47,6 +60,9 @@ impl WriteForm {
     pub fn source_suggestion(&self) -> Option<&str> {
         let input = self.source.text();
         if input.is_empty() {
+            return None;
+        }
+        if self.sources.iter().any(|s| s.slug == input) {
             return None;
         }
         self.sources
@@ -120,14 +136,15 @@ pub struct App {
     similar_cache: HashMap<(NoteKind, String), Vec<Near>>,
     selected: HashSet<(NoteKind, String)>,
     cursor: usize,
-    detail_scroll: u16,
+    detail_scroll: Cell<u16>,
     pending_key: Option<KeyEvent>,
-    message: Option<String>,
+    message: Option<Message>,
     review_count: usize,
     failed_count: usize,
     show_help: bool,
     write_form: Option<WriteForm>,
     promote: Option<PromoteState>,
+    saved_promote_body: Option<String>,
     confirm_delete: Option<Vec<(NoteKind, String)>>,
     proposals: Vec<Proposal>,
     review_decisions: BTreeMap<String, Decision>,
@@ -156,7 +173,7 @@ impl App {
             similar_cache: HashMap::new(),
             selected: HashSet::new(),
             cursor: 0,
-            detail_scroll: 0,
+            detail_scroll: Cell::new(0),
             pending_key: None,
             message: None,
             review_count: 0,
@@ -164,6 +181,7 @@ impl App {
             show_help: false,
             write_form: None,
             promote: None,
+            saved_promote_body: None,
             confirm_delete: None,
             proposals: Vec::new(),
             review_decisions: BTreeMap::new(),
@@ -184,16 +202,30 @@ impl App {
         app
     }
 
+    fn set_info(&mut self, msg: impl Into<String>) {
+        self.message = Some(Message {
+            kind: MessageKind::Info,
+            text: msg.into(),
+        });
+    }
+
+    fn set_error(&mut self, msg: impl Into<String>) {
+        self.message = Some(Message {
+            kind: MessageKind::Error,
+            text: msg.into(),
+        });
+    }
+
     fn record_error(&mut self, msg: String) {
         if self.message.is_none() {
-            self.message = Some(msg);
+            self.set_error(msg);
         }
     }
 
     pub fn reload_inbox(&mut self) {
         self.similar_cache.clear();
         self.embeddings.clear();
-        self.detail_scroll = 0;
+        self.detail_scroll.set(0);
 
         match self.store.inbox() {
             Ok(mut items) => {
@@ -301,6 +333,28 @@ impl App {
         }
     }
 
+    pub fn on_paste(&mut self, text: &str) {
+        if self.show_help {
+            return;
+        }
+        if let Some(form) = self.write_form.as_mut() {
+            let target = match form.focus {
+                WriteField::Body => &mut form.body,
+                WriteField::Source => &mut form.source,
+                WriteField::Locator => &mut form.locator,
+            };
+            target.insert_str(text);
+            return;
+        }
+        if let Some(PromoteState::Title { input, .. }) = self.promote.as_mut() {
+            input.insert_str(text);
+            return;
+        }
+        if let Some(input) = self.review_reason.as_mut() {
+            input.insert_str(text);
+        }
+    }
+
     fn handle_action(&mut self, action: Action) -> Option<Effect> {
         if self.screen == Screen::Review {
             self.handle_review_action(action);
@@ -315,21 +369,21 @@ impl App {
             Action::Down => {
                 if self.cursor + 1 < self.inbox.len() {
                     self.cursor += 1;
-                    self.detail_scroll = 0;
+                    self.detail_scroll.set(0);
                     self.ensure_similar_permanent();
                 }
             }
             Action::Up => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
-                    self.detail_scroll = 0;
+                    self.detail_scroll.set(0);
                     self.ensure_similar_permanent();
                 }
             }
             Action::Top => {
                 if !self.inbox.is_empty() && self.cursor != 0 {
                     self.cursor = 0;
-                    self.detail_scroll = 0;
+                    self.detail_scroll.set(0);
                     self.ensure_similar_permanent();
                 }
             }
@@ -338,16 +392,16 @@ impl App {
                     let last = self.inbox.len() - 1;
                     if self.cursor != last {
                         self.cursor = last;
-                        self.detail_scroll = 0;
+                        self.detail_scroll.set(0);
                         self.ensure_similar_permanent();
                     }
                 }
             }
             Action::ScrollDown => {
-                self.detail_scroll = self.detail_scroll.saturating_add(5);
+                self.detail_scroll.set(self.detail_scroll.get().saturating_add(5));
             }
             Action::ScrollUp => {
-                self.detail_scroll = self.detail_scroll.saturating_sub(5);
+                self.detail_scroll.set(self.detail_scroll.get().saturating_sub(5));
             }
             Action::Help => {
                 self.show_help = !self.show_help;
@@ -410,11 +464,15 @@ impl App {
     }
 
     pub fn message(&self) -> Option<&str> {
-        self.message.as_deref()
+        self.message.as_ref().map(|m| m.text.as_str())
+    }
+
+    pub fn message_kind(&self) -> Option<MessageKind> {
+        self.message.as_ref().map(|m| m.kind)
     }
 
     pub fn set_message(&mut self, msg: impl Into<String>) {
-        self.message = Some(msg.into());
+        self.set_error(msg);
     }
 
     pub fn screen(&self) -> Screen {
@@ -480,7 +538,11 @@ impl App {
     }
 
     pub fn detail_scroll(&self) -> u16 {
-        self.detail_scroll
+        self.detail_scroll.get()
+    }
+
+    pub fn clamp_detail_scroll(&self, max: u16) {
+        self.detail_scroll.set(self.detail_scroll.get().min(max));
     }
 
     pub fn show_help(&self) -> bool {
@@ -587,7 +649,7 @@ impl App {
     }
 
     pub fn reload_review(&mut self) {
-        self.detail_scroll = 0;
+        self.detail_scroll.set(0);
         match self.store.proposals() {
             Ok((props, state)) => {
                 self.review_count = props.len();
@@ -663,22 +725,22 @@ impl App {
             Action::Next => {
                 if self.review_cursor + 1 < self.proposals.len() {
                     self.review_cursor += 1;
-                    self.detail_scroll = 0;
+                    self.detail_scroll.set(0);
                     self.ensure_review_notes();
                 }
             }
             Action::Prev => {
                 if self.review_cursor > 0 {
                     self.review_cursor -= 1;
-                    self.detail_scroll = 0;
+                    self.detail_scroll.set(0);
                     self.ensure_review_notes();
                 }
             }
             Action::ScrollDown => {
-                self.detail_scroll = self.detail_scroll.saturating_add(5);
+                self.detail_scroll.set(self.detail_scroll.get().saturating_add(5));
             }
             Action::ScrollUp => {
-                self.detail_scroll = self.detail_scroll.saturating_sub(5);
+                self.detail_scroll.set(self.detail_scroll.get().saturating_sub(5));
             }
             Action::Adopt => {
                 self.apply_review_decision(Decision::Adopt { reason: None });
@@ -732,7 +794,7 @@ impl App {
                 self.review_redo.clear();
                 if self.review_cursor + 1 < self.proposals.len() {
                     self.review_cursor += 1;
-                    self.detail_scroll = 0;
+                    self.detail_scroll.set(0);
                     self.ensure_review_notes();
                 }
             }
@@ -754,11 +816,11 @@ impl App {
     fn handle_review_error(&mut self, err: Error) {
         match err {
             Error::Invalid(msg) => {
-                self.message = Some(msg);
+                self.set_error(msg);
                 self.reload_review();
             }
             other => {
-                self.message = Some(other.to_string());
+                self.set_error(other.to_string());
             }
         }
     }
@@ -776,10 +838,13 @@ impl App {
                         if !self.proposals.is_empty() {
                             self.review_cursor = cursor.min(self.proposals.len() - 1);
                         }
-                        self.detail_scroll = 0;
+                        self.detail_scroll.set(0);
                         self.ensure_review_notes();
                     }
-                    Err(e) => self.handle_review_error(e),
+                    Err(e) => {
+                        self.review_undo.push(ReviewEdit::Decide { cursor, key, prev, next });
+                        self.handle_review_error(e);
+                    }
                 }
             }
             ReviewEdit::Rehub { cursor, hub_slug, rehubbed } => {
@@ -789,7 +854,10 @@ impl App {
                         self.review_cursor = cursor;
                         self.reload_review();
                     }
-                    Err(e) => self.handle_review_error(e),
+                    Err(e) => {
+                        self.review_undo.push(ReviewEdit::Rehub { cursor, hub_slug, rehubbed });
+                        self.handle_review_error(e);
+                    }
                 }
             }
         }
@@ -808,10 +876,13 @@ impl App {
                         if !self.proposals.is_empty() {
                             self.review_cursor = cursor.min(self.proposals.len() - 1);
                         }
-                        self.detail_scroll = 0;
+                        self.detail_scroll.set(0);
                         self.ensure_review_notes();
                     }
-                    Err(e) => self.handle_review_error(e),
+                    Err(e) => {
+                        self.review_redo.push(ReviewEdit::Decide { cursor, key, prev, next });
+                        self.handle_review_error(e);
+                    }
                 }
             }
             ReviewEdit::Rehub { cursor, hub_slug, rehubbed } => {
@@ -825,7 +896,10 @@ impl App {
                         self.review_cursor = cursor;
                         self.reload_review();
                     }
-                    Err(e) => self.handle_review_error(e),
+                    Err(e) => {
+                        self.review_redo.push(ReviewEdit::Rehub { cursor, hub_slug, rehubbed });
+                        self.handle_review_error(e);
+                    }
                 }
             }
         }
@@ -910,11 +984,16 @@ impl App {
                 Ok(done) => {
                     let s = done.value;
                     let mut msg = format!("マージしました (リンク {} 本、ハブ {} 件)", s.links, s.hubs);
+                    let has_warning = done.queue_warning.is_some() || done.worker_warning.is_some();
                     for w in [done.queue_warning, done.worker_warning].into_iter().flatten() {
                         msg.push_str(" / ");
                         msg.push_str(&w);
                     }
-                    self.message = Some(msg);
+                    if has_warning {
+                        self.set_error(msg);
+                    } else {
+                        self.set_info(msg);
+                    }
                     self.review_undo.clear();
                     self.review_redo.clear();
                     self.reload_review();
@@ -957,7 +1036,7 @@ impl App {
                 if title.is_empty() {
                     return None;
                 }
-                let draft = draft::build(&items);
+                let draft = draft::build_with_body(&items, self.saved_promote_body.as_deref());
                 self.promote = Some(PromoteState::Editing { from, title });
                 Some(Effect::Edit { draft })
             }
@@ -978,31 +1057,38 @@ impl App {
         let text = match body {
             Ok(t) => t,
             Err(reason) => {
-                self.message = Some(if reason.trim().is_empty() {
-                    "昇格を取り消しました".to_string()
+                if reason.trim().is_empty() {
+                    self.set_info("昇格を取り消しました");
                 } else {
-                    format!("昇格を取り消しました: {reason}")
-                });
+                    self.set_error(format!("昇格を取り消しました: {reason}"));
+                }
                 return;
             }
         };
         let Some(parsed) = draft::parse(&text) else {
-            self.message = Some("昇格を取り消しました".to_string());
+            self.set_info("昇格を取り消しました");
             return;
         };
         match self.store.promote(&from, &title, &parsed) {
             Ok(done) => {
+                self.saved_promote_body = None;
                 let mut msg = format!("昇格しました {}", done.value);
+                let has_warning = done.queue_warning.is_some() || done.worker_warning.is_some();
                 for w in [done.queue_warning, done.worker_warning].into_iter().flatten() {
                     msg.push_str(" / ");
                     msg.push_str(&w);
                 }
-                self.message = Some(msg);
+                if has_warning {
+                    self.set_error(msg);
+                } else {
+                    self.set_info(msg);
+                }
                 self.selected.clear();
                 self.reload_inbox();
             }
             Err(e) => {
-                self.message = Some(e.to_string());
+                self.saved_promote_body = Some(parsed);
+                self.set_error(format!("{e} (書いた本文は次の昇格の下書きに残します)"));
             }
         }
     }
@@ -1040,7 +1126,8 @@ impl App {
                     self.reload_inbox();
                 }
                 Err(e) => {
-                    self.message = Some(e.to_string());
+                    self.set_error(e.to_string());
+                    self.reload_inbox();
                 }
             }
         }
@@ -1069,7 +1156,7 @@ impl App {
     fn record_done_warnings(&mut self, queue_warning: Option<String>, worker_warning: Option<String>) {
         let warnings: Vec<String> = [queue_warning, worker_warning].into_iter().flatten().collect();
         if !warnings.is_empty() {
-            self.message = Some(warnings.join(" / "));
+            self.set_error(warnings.join(" / "));
         }
     }
 
@@ -1270,25 +1357,31 @@ impl App {
         match self.store.write(note) {
             Ok(done) => {
                 self.write_form = None;
-                let mut msg = match done.value {
-                    WriteOutcome::Saved(slug) => format!("保存しました {slug}"),
+                let (mut msg, mut is_err) = match done.value {
+                    WriteOutcome::Saved(slug) => (format!("保存しました {slug}"), false),
                     WriteOutcome::Queued(e) => {
-                        if e.is_transient() {
+                        let m = if e.is_transient() {
                             "omnigraph-server に届かないので待ち行列に保存しました".to_string()
                         } else {
                             format!("書けなかったので待ち行列に保存しました: {e}")
-                        }
+                        };
+                        (m, true)
                     }
                 };
                 for w in [done.queue_warning, done.worker_warning].into_iter().flatten() {
+                    is_err = true;
                     msg.push_str(" / ");
                     msg.push_str(&w);
                 }
-                self.message = Some(msg);
+                if is_err {
+                    self.set_error(msg);
+                } else {
+                    self.set_info(msg);
+                }
                 self.reload_inbox();
             }
             Err(e) => {
-                self.message = Some(e.to_string());
+                self.set_error(e.to_string());
             }
         }
     }
@@ -1372,14 +1465,16 @@ impl App {
                 .collect();
         }
         if self.screen == Screen::Inbox {
-            let mut pairs: Vec<(Action, &'static str)> = vec![
-                (
-                    Action::Write,
-                    if self.selected.is_empty() { "書く" } else { "昇格" },
-                ),
-                (Action::Toggle, "選ぶ"),
-                (Action::ClearSelection, "選択解除"),
-            ];
+            let mut pairs: Vec<(Action, &'static str)> = vec![(
+                Action::Write,
+                if self.selected.is_empty() { "書く" } else { "昇格" },
+            )];
+            if !self.inbox.is_empty() {
+                pairs.push((Action::Toggle, "選ぶ"));
+            }
+            if !self.selected.is_empty() {
+                pairs.push((Action::ClearSelection, "選択解除"));
+            }
             if !self.inbox.is_empty() {
                 pairs.push((Action::Delete, "削除"));
             }
@@ -2330,5 +2425,162 @@ mod tests {
         let eff2 = app.on_key(key('z'));
         assert!(eff2.is_none());
         assert!(!app.show_help());
+    }
+
+    #[test]
+    fn on_paste_inserts_into_open_input_and_ignores_when_closed() {
+        let mut app = App::new(Box::new(three_store()), settings());
+        // 入力欄が閉じているときは何もしない
+        app.on_paste("dy\nmy");
+        assert!(app.confirm_delete_count().is_none());
+
+        // 書く欄が開いているときは改行を空白にして差し込む
+        app.on_key(key('i'));
+        app.on_paste("1行目\r\n2行目\nd");
+        assert_eq!(app.write_form().unwrap().body.text(), "1行目 2行目 d");
+        assert!(app.write_form().is_some());
+
+        // 題の欄でも同様
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.on_key(key(' '));
+        app.on_key(key('i'));
+        app.on_paste("題1\n題2");
+        assert_eq!(app.promote_title().unwrap().text(), "題1 題2");
+
+        // 理由の欄でも同様
+        let mut review_app = App::new(Box::new(review_store()), settings());
+        review_app.on_key(key('r'));
+        review_app.on_key(key('A'));
+        review_app.on_paste("理由1\n理由2");
+        assert_eq!(review_app.review_reason().unwrap().text(), "理由1 理由2");
+    }
+
+    #[test]
+    fn promote_failure_keeps_body_until_next_promote_succeeds() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key(' '));
+        app.on_key(key('i'));
+        app.on_key(key('題'));
+        let _ = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        store.borrow_mut().fail_with = Some(Error::Transient("一時失敗".into()));
+        app.finish_promote(Ok("残すべき本文".into()));
+        assert_eq!(app.message_kind(), Some(MessageKind::Error));
+        assert!(
+            app.message()
+                .is_some_and(|m| m.contains("書いた本文は次の昇格の下書きに残します")),
+            "msg={:?}",
+            app.message()
+        );
+
+        // 同じ昇格をやり直すと、目印の文の代わりに残した本文が先頭に入る
+        app.on_key(key('i'));
+        app.on_key(key('題'));
+        let eff = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Effect::Edit { draft } = eff.unwrap() else {
+            panic!("expected Edit");
+        };
+        assert!(draft.starts_with("残すべき本文\n"), "draft={draft}");
+        assert!(!draft.contains("(ここに Permanent を書く)"), "draft={draft}");
+
+        // 成功したら捨てられる
+        store.borrow_mut().fail_with = None;
+        app.finish_promote(Ok(draft));
+        assert_eq!(app.message_kind(), Some(MessageKind::Info));
+
+        app.on_key(key(' '));
+        app.on_key(key('i'));
+        app.on_key(key('別'));
+        let eff2 = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Effect::Edit { draft: draft2 } = eff2.unwrap() else {
+            panic!("expected Edit");
+        };
+        assert!(draft2.starts_with("(ここに Permanent を書く)\n"), "draft2={draft2}");
+    }
+
+    #[test]
+    fn delete_failure_reloads_inbox() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        store.borrow_mut().calls.clear();
+        store.borrow_mut().fail_with = Some(Error::Transient("途中で失敗".into()));
+
+        app.on_key(key('d'));
+        app.on_key(key('y'));
+        assert_eq!(app.message(), Some("途中で失敗"));
+        assert!(store.borrow().calls.iter().any(|c| c == "inbox"));
+    }
+
+    #[test]
+    fn message_kind_is_info_on_success_and_error_on_failure() {
+        let mut app = App::new(Box::new(three_store()), settings());
+        app.on_key(key('i'));
+        app.on_key(key('a'));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.message_kind(), Some(MessageKind::Info));
+        assert!(app.message().is_some_and(|m| m.contains("保存しました")));
+
+        app.set_message("失敗");
+        assert_eq!(app.message_kind(), Some(MessageKind::Error));
+    }
+
+    #[test]
+    fn source_completion_hides_when_exact_match_exists() {
+        let mut store = three_store();
+        store.sources = vec![
+            SourceSummary {
+                slug: "ahrens2017".into(),
+                kind: "book".into(),
+            },
+            SourceSummary {
+                slug: "ahrens2017b".into(),
+                kind: "book".into(),
+            },
+        ];
+        let mut app = App::new(Box::new(store), settings());
+        app.on_key(key('i'));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        for c in "ahrens2017".chars() {
+            app.on_key(key(c));
+        }
+        assert_eq!(app.write_form().unwrap().source_suggestion(), None);
+    }
+
+    #[test]
+    fn undo_and_redo_failure_restores_history() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        app.on_key(key('a'));
+        assert!(app.current_decision().is_none()); // カーソルが次に進んだ
+
+        // 1 回目の undo が失敗しても履歴が消えず、復旧後に undo できる
+        store.borrow_mut().fail_with = Some(Error::Transient("server down".into()));
+        app.on_key(key('u'));
+        assert_eq!(app.message(), Some("server down"));
+
+        store.borrow_mut().fail_with = None;
+        app.on_key(key('u'));
+        assert_eq!(app.review_cursor(), 0);
+        assert!(app.current_decision().is_none());
+
+        // redo も失敗時に履歴が消えず、復旧後に redo できる
+        store.borrow_mut().fail_with = Some(Error::Transient("server down".into()));
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.message(), Some("server down"));
+
+        store.borrow_mut().fail_with = None;
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(matches!(app.current_decision(), Some(Decision::Adopt { .. })));
     }
 }

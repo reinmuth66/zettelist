@@ -243,8 +243,11 @@ impl Store for FakeStore {
         Ok(Rehubbed {
             old_key: key.to_string(),
             new_key: format!("hub:{hub}:"),
+            hub: hub.to_string(),
+            note: String::new(),
             created: true,
             previous: None,
+            new_previous: None,
         })
     }
 

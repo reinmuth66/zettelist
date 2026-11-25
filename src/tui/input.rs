@@ -26,6 +26,14 @@ impl LineInput {
         self.cursor == self.text.chars().count()
     }
 
+    /// カーソル位置に文字列を差し込む。改行は空白に置き換える。
+    pub fn insert_str(&mut self, s: &str) {
+        let cleaned = s.replace("\r\n", " ").replace(['\n', '\r'], " ");
+        let idx = self.byte_index(self.cursor);
+        self.text.insert_str(idx, &cleaned);
+        self.cursor += cleaned.chars().count();
+    }
+
     /// キー入力を処理する。処理したら true、それ以外は false。
     pub fn handle(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
@@ -103,7 +111,8 @@ impl LineInput {
         // カーソルが幅の中に収まるよう、左端の文字位置を決める。
         let mut start = 0;
         let mut prefix_w: usize = chars[..cursor].iter().map(|(_, w)| *w).sum();
-        while prefix_w >= max_w && start < cursor {
+        let cursor_w = chars.get(cursor).map(|(_, w)| *w).unwrap_or(0);
+        while prefix_w + cursor_w.max(1) > max_w && start < cursor {
             prefix_w -= chars[start].1;
             start += 1;
         }
@@ -222,5 +231,25 @@ mod tests {
         assert!(input.handle(ctrl('e')));
         assert!(input.handle(key(KeyCode::Char('d'))));
         assert_eq!(input.text(), "bcd");
+    }
+
+    #[test]
+    fn insert_str_replaces_newlines_with_space() {
+        let mut input = LineInput::new("ac");
+        assert!(input.handle(key(KeyCode::Left)));
+        input.insert_str("1\r\n2\n3\r4");
+        assert_eq!(input.text(), "a1 2 3 4c");
+        input.insert_str("x");
+        assert_eq!(input.text(), "a1 2 3 4xc");
+    }
+
+    #[test]
+    fn view_keeps_fullwidth_char_under_cursor_visible() {
+        let mut input = LineInput::new("あいうえお");
+        // カーソルを「お」(先頭から幅 8 の位置) の前に置く
+        assert!(input.handle(key(KeyCode::Left)));
+        let (visible, col) = input.view(9);
+        assert!(visible.ends_with('お'), "visible={visible:?}");
+        assert!(col + 2 <= 9, "col={col}");
     }
 }

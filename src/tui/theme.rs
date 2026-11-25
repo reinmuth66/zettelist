@@ -1,6 +1,5 @@
 use crate::error::Error;
 use ratatui::style::Color;
-use std::collections::BTreeMap;
 
 /// 端末の 16 色だけで構成する配色。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,9 +33,15 @@ impl Default for Theme {
 
 impl Theme {
     /// 設定ファイルの `[theme]` から配色を作る。書かれていない項目は既定値を使う。
-    pub fn from_config(map: &BTreeMap<String, String>) -> Result<Theme, Error> {
+    pub fn from_config(val: &toml::Value) -> Result<Theme, Error> {
+        let Some(map) = val.as_table() else {
+            return Err(Error::Invalid("[theme] はテーブルにしてください".to_string()));
+        };
         let mut theme = Theme::default();
-        for (item, value) in map {
+        for (item, raw) in map {
+            let value = raw.as_str().ok_or_else(|| {
+                Error::Invalid(format!("[theme] の {item} は文字列にしてください"))
+            })?;
             let target = match item.as_str() {
                 "cursor" => &mut theme.cursor,
                 "selected" => &mut theme.selected,
@@ -83,27 +88,33 @@ fn parse_color(item: &str, name: &str) -> Result<Color, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+
+    fn toml_val(s: &str) -> toml::Value {
+        toml::from_str(s).unwrap()
+    }
 
     #[test]
     fn theme_overrides_one_color() {
-        let mut map = BTreeMap::new();
-        map.insert("similar".to_string(), "red".to_string());
-        let t = Theme::from_config(&map).unwrap();
+        let t = Theme::from_config(&toml_val("similar = \"red\"")).unwrap();
         assert_eq!(t.similar, Color::Red);
         assert_eq!(t.old, Theme::default().old);
     }
 
     #[test]
     fn theme_rejects_unknown_color_and_item() {
-        let mut bad_color = BTreeMap::new();
-        bad_color.insert("similar".to_string(), "pink".to_string());
-        let err = Theme::from_config(&bad_color).unwrap_err();
+        let err = Theme::from_config(&toml_val("similar = \"pink\"")).unwrap_err();
         assert!(err.to_string().contains("similar"), "err: {err}");
 
-        let mut bad_item = BTreeMap::new();
-        bad_item.insert("nosuch".to_string(), "red".to_string());
-        let err = Theme::from_config(&bad_item).unwrap_err();
+        let err = Theme::from_config(&toml_val("nosuch = \"red\"")).unwrap_err();
         assert!(err.to_string().contains("nosuch"), "err: {err}");
+    }
+
+    #[test]
+    fn theme_rejects_invalid_shape() {
+        let err = Theme::from_config(&toml::Value::String("red".to_string())).unwrap_err();
+        assert!(err.to_string().contains("[theme]"), "err: {err}");
+
+        let err = Theme::from_config(&toml_val("similar = 42")).unwrap_err();
+        assert!(err.to_string().contains("similar"), "err: {err}");
     }
 }

@@ -366,8 +366,11 @@ pub fn hubs(og: &Omnigraph) -> Result<Vec<HubSummary>, Error> {
 pub struct Rehubbed {
     pub old_key: String,
     pub new_key: String,
+    pub hub: String,
+    pub note: String,
     pub created: bool,
     pub previous: Option<Decision>,
+    pub new_previous: Option<Decision>,
 }
 
 /// Hub の提案 `key` を別の Hub `hub` へ選び直す。
@@ -394,7 +397,7 @@ pub fn rehub(og: &Omnigraph, state_path: &Path, lock_path: &Path, key: &str, hub
     }
 
     let mut state = ReviewState::load(state_path)?;
-    let new_proposal = Proposal::Hub { hub: hub.to_string(), note };
+    let new_proposal = Proposal::Hub { hub: hub.to_string(), note: note.clone() };
     let new_key = new_proposal.key();
     let created = !proposals.iter().any(|p| p.key() == new_key);
     if created {
@@ -402,10 +405,19 @@ pub fn rehub(og: &Omnigraph, state_path: &Path, lock_path: &Path, key: &str, hub
         og.load(REVIEW, &[new_proposal.line(None)])?;
     }
     let previous = state.decisions.get(key).cloned();
+    let new_previous = state.decisions.get(&new_key).cloned();
     state.decisions.insert(key.to_string(), Decision::Reject);
     state.decisions.insert(new_key.clone(), Decision::Adopt { reason: None });
     state.save(state_path)?;
-    Ok(Rehubbed { old_key: key.to_string(), new_key, created, previous })
+    Ok(Rehubbed {
+        old_key: key.to_string(),
+        new_key,
+        hub: hub.to_string(),
+        note,
+        created,
+        previous,
+        new_previous,
+    })
 }
 
 /// `rehub` を取り消して、元の状態に戻す。
@@ -414,13 +426,23 @@ pub fn rehub(og: &Omnigraph, state_path: &Path, lock_path: &Path, key: &str, hub
 pub fn unrehub(og: &Omnigraph, state_path: &Path, lock_path: &Path, r: &Rehubbed) -> Result<(), Error> {
     let _lock = lock_review(lock_path)?;
     if r.created {
-        let Some((hub, note)) = r.new_key.strip_prefix("hub:").and_then(|s| s.split_once(':')) else {
-            return Err(Error::Invalid(format!("Hub の鍵ではありません: {}", r.new_key)));
-        };
-        delete_from_review(og, &Proposal::Hub { hub: hub.to_string(), note: note.to_string() })?;
+        delete_from_review(
+            og,
+            &Proposal::Hub {
+                hub: r.hub.clone(),
+                note: r.note.clone(),
+            },
+        )?;
     }
     let mut state = ReviewState::load(state_path)?;
-    state.decisions.remove(&r.new_key);
+    match &r.new_previous {
+        Some(d) => {
+            state.decisions.insert(r.new_key.clone(), d.clone());
+        }
+        None => {
+            state.decisions.remove(&r.new_key);
+        }
+    }
     match &r.previous {
         Some(d) => {
             state.decisions.insert(r.old_key.clone(), d.clone());

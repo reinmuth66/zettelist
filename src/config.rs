@@ -2,11 +2,10 @@
 //! ファイルがない、または項目が書かれていないときは既定値を使う。
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub omnigraph: OmnigraphConfig,
@@ -14,8 +13,22 @@ pub struct Config {
     pub embed: EmbedConfig,
     pub link: LinkConfig,
     pub ui: UiConfig,
-    pub theme: BTreeMap<String, String>,
-    pub keys: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    pub theme: toml::Value,
+    pub keys: toml::Value,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            omnigraph: OmnigraphConfig::default(),
+            backup: BackupConfig::default(),
+            embed: EmbedConfig::default(),
+            link: LinkConfig::default(),
+            ui: UiConfig::default(),
+            theme: toml::Value::Table(toml::map::Map::new()),
+            keys: toml::Value::Table(toml::map::Map::new()),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,11 +195,26 @@ mod tests {
             Path::new("/h"),
         )
         .unwrap();
-        assert_eq!(c.theme.get("similar").map(String::as_str), Some("red"));
+        assert_eq!(c.theme.get("similar").and_then(|v| v.as_str()), Some("red"));
         assert_eq!(
-            c.keys.get("inbox").and_then(|m| m.get("delete")),
-            Some(&vec!["D".to_string()])
+            c.keys
+                .get("inbox")
+                .and_then(|m| m.get("delete"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>()),
+            Some(vec!["D"])
         );
+    }
+
+    #[test]
+    fn theme_and_keys_accept_any_shape() {
+        for toml in [
+            "theme = \"red\"\nkeys = 123\n",
+            "[theme]\nsimilar = 42\n[keys.inbox]\ndown = \"j\"\n",
+            "[keys]\ninbox = [\"bad\"]\n",
+        ] {
+            assert!(Config::from_toml_str(toml, Path::new("/h")).is_ok(), "toml: {toml}");
+        }
     }
 
     #[test]

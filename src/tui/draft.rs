@@ -6,8 +6,14 @@ const MARKER: &str = "# ---- この行から下は保存時に消える ----";
 
 /// 選んだ inbox ノートから、昇格用の `$EDITOR` 下書きを組み立てる。
 pub fn build(items: &[InboxItem]) -> String {
+    build_with_body(items, None)
+}
+
+/// 選んだ inbox ノートと初期本文から、昇格用の `$EDITOR` 下書きを組み立てる。
+pub fn build_with_body(items: &[InboxItem], initial_body: Option<&str>) -> String {
+    let first = initial_body.unwrap_or(PLACEHOLDER);
     let mut lines = vec![
-        PLACEHOLDER.to_string(),
+        first.to_string(),
         String::new(),
         MARKER.to_string(),
     ];
@@ -111,5 +117,15 @@ mod tests {
     fn parse_without_marker_keeps_all() {
         assert_eq!(parse("  本文のみ\n2行目  ").as_deref(), Some("本文のみ\n2行目"));
         assert_eq!(parse("   \n  "), None);
+    }
+
+    #[test]
+    fn build_with_body_replaces_placeholder_only() {
+        let items = vec![fleeting("20261118090000", "メモ")];
+        let text = build_with_body(&items, Some("残した本文"));
+        assert!(text.starts_with("残した本文\n"), "{text}");
+        assert!(!text.contains("(ここに Permanent を書く)"), "{text}");
+        assert!(text.contains("# [1118 F] メモ"), "{text}");
+        assert_eq!(parse(&text).as_deref(), Some("残した本文"));
     }
 }

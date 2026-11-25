@@ -1,7 +1,7 @@
 use crate::notes::NoteKind;
 use crate::queue::Job;
 use crate::review::{Decision, Proposal};
-use crate::tui::app::{App, WriteField, WriteForm};
+use crate::tui::app::{App, MessageKind, WriteField, WriteForm};
 use crate::tui::keys::Screen;
 use crate::tui::text::{short_date, truncate};
 use chrono::Utc;
@@ -96,7 +96,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if has_msg {
         if let Some(msg) = app.message() {
-            let p = Paragraph::new(msg).style(Style::default().fg(app.settings().theme.error));
+            let style = match app.message_kind() {
+                Some(MessageKind::Error) => Style::default().fg(app.settings().theme.error),
+                _ => Style::default(),
+            };
+            let p = Paragraph::new(msg).style(style);
             frame.render_widget(p, chunks[idx]);
         }
         idx += 1;
@@ -296,6 +300,20 @@ fn draw_inbox_detail(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(format!("{title} ({:.2})", near.similarity)));
         }
     }
+
+    let inner_w = area.width.saturating_sub(2);
+    let inner_h = area.height.saturating_sub(2);
+    let total_lines = if inner_w == 0 {
+        0
+    } else {
+        lines
+            .iter()
+            .map(|l| l.width().max(1).div_ceil(inner_w as usize))
+            .sum::<usize>()
+            .min(u16::MAX as usize) as u16
+    };
+    let max_scroll = total_lines.saturating_sub(inner_h);
+    app.clamp_detail_scroll(max_scroll);
 
     let detail = Paragraph::new(lines)
         .block(block)
@@ -1050,5 +1068,66 @@ mod tests {
         let screen = render(&app, 100, 20);
         assert!(screen.contains("理由を書いて採用"), "{screen}");
         assert!(screen.contains("A"), "{screen}");
+    }
+
+    #[test]
+    fn inbox_footer_hides_unusable_keys() {
+        let empty = App::new(Box::new(FakeStore::default()), settings());
+        let empty_screen = render(&empty, 100, 20);
+        let empty_footer = empty_screen.lines().last().unwrap_or("");
+        assert!(!empty_footer.contains("[space]"), "empty_footer: {empty_footer}");
+        assert!(!empty_footer.contains("[Esc]"), "empty_footer: {empty_footer}");
+        assert!(!empty_footer.contains("[d]"), "empty_footer: {empty_footer}");
+        assert!(!empty_footer.contains("[o]"), "empty_footer: {empty_footer}");
+
+        let mut app = App::new(Box::new(three_store()), settings());
+        let unselected_screen = render(&app, 100, 20);
+        let unselected_footer = unselected_screen.lines().last().unwrap_or("");
+        assert!(unselected_footer.contains("[space]"), "unselected_footer: {unselected_footer}");
+        assert!(!unselected_footer.contains("[Esc]"), "unselected_footer: {unselected_footer}");
+        assert!(unselected_footer.contains("[d]"), "unselected_footer: {unselected_footer}");
+        assert!(!unselected_footer.contains("[o]"), "unselected_footer: {unselected_footer}");
+
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let selected_screen = render(&app, 100, 20);
+        let selected_footer = selected_screen.lines().last().unwrap_or("");
+        assert!(selected_footer.contains("[Esc]"), "selected_footer: {selected_footer}");
+    }
+
+    #[test]
+    fn info_message_uses_default_color_and_error_uses_theme_error() {
+        let mut app = App::new(Box::new(three_store()), settings());
+        app.on_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        // メッセージ行は最下行 (y=19) の 1 つ上 (y=18)
+        assert_eq!(buf[(0, 18)].fg, ratatui::style::Color::Reset);
+
+        app.set_message("失敗しました");
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf2 = terminal.backend().buffer();
+        assert_eq!(buf2[(0, 18)].fg, settings().theme.error);
+    }
+
+    #[test]
+    fn inbox_detail_scroll_is_clamped_at_bottom() {
+        let mut app = App::new(Box::new(three_store()), settings());
+        for _ in 0..10 {
+            app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        }
+        assert!(app.detail_scroll() > 0);
+        let _ = render(&app, 100, 20);
+        let clamped = app.detail_scroll();
+        assert!(clamped < 50, "clamped={clamped}");
+
+        // さらに Ctrl-d しても増え続けない
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        let _ = render(&app, 100, 20);
+        assert_eq!(app.detail_scroll(), clamped);
     }
 }

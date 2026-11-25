@@ -1,6 +1,5 @@
 use crate::error::Error;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Screen {
@@ -129,8 +128,8 @@ impl Default for Keymap {
 
 fn normalize_key(key: KeyEvent) -> (KeyCode, KeyModifiers) {
     let mut mods = key.modifiers;
-    if matches!(key.code, KeyCode::Char(_)) {
-        // 大文字や記号は文字自体が Shift を含むため、SHIFT フラグを外して揃える
+    if matches!(key.code, KeyCode::Char(_) | KeyCode::BackTab) {
+        // 大文字や記号、BackTab はキー自体が Shift を含むため、SHIFT フラグを外して揃える
         mods.remove(KeyModifiers::SHIFT);
     }
     (key.code, mods)
@@ -138,9 +137,12 @@ fn normalize_key(key: KeyEvent) -> (KeyCode, KeyModifiers) {
 
 impl Keymap {
     /// 設定ファイルの `[keys]` からキー割り当てを作る。書かれた動作は既定を置き換え、衝突を検査する。
-    pub fn from_config(map: &BTreeMap<String, BTreeMap<String, Vec<String>>>) -> Result<Keymap, Error> {
+    pub fn from_config(val: &toml::Value) -> Result<Keymap, Error> {
+        let Some(map) = val.as_table() else {
+            return Err(Error::Invalid("[keys] はテーブルにしてください".to_string()));
+        };
         let mut keymap = Keymap::default();
-        for (section_name, actions) in map {
+        for (section_name, section_val) in map {
             let screen = match section_name.as_str() {
                 "common" => None,
                 "inbox" => Some(Screen::Inbox),
@@ -152,16 +154,31 @@ impl Keymap {
                     )))
                 }
             };
-            for (action_name, keys) in actions {
+            let Some(actions) = section_val.as_table() else {
+                return Err(Error::Invalid(format!(
+                    "[keys.{section_name}] はテーブルにしてください"
+                )));
+            };
+            for (action_name, keys_val) in actions {
                 let action = parse_action(screen, action_name).ok_or_else(|| {
                     Error::Invalid(format!(
                         "[keys.{section_name}] の動作 '{action_name}' はありません"
                     ))
                 })?;
+                let Some(keys) = keys_val.as_array() else {
+                    return Err(Error::Invalid(format!(
+                        "[keys.{section_name}] の {action_name} は配列にしてください"
+                    )));
+                };
                 keymap
                     .bindings
                     .retain(|b| !(b.screen == screen && b.action == action));
-                for raw in keys {
+                for item in keys {
+                    let Some(raw) = item.as_str() else {
+                        return Err(Error::Invalid(format!(
+                            "[keys.{section_name}] の {action_name} のキーは文字列にしてください"
+                        )));
+                    };
                     let seq = parse_key_seq(raw).map_err(|msg| {
                         Error::Invalid(format!(
                             "[keys.{section_name}] の {action_name} のキー '{raw}' {msg}"
@@ -331,6 +348,39 @@ fn parse_single_key(s: &str) -> Result<(KeyCode, KeyModifiers), &'static str> {
     Err("を読めません")
 }
 
+fn action_name(action: Action) -> &'static str {
+    match action {
+        Action::Down => "down",
+        Action::Up => "up",
+        Action::Top => "top",
+        Action::Bottom => "bottom",
+        Action::ScrollDown => "scroll_down",
+        Action::ScrollUp => "scroll_up",
+        Action::Help => "help",
+        Action::Quit => "quit",
+        Action::Write => "write",
+        Action::Toggle => "toggle",
+        Action::ClearSelection => "clear_selection",
+        Action::Delete => "delete",
+        Action::ToReview => "to_review",
+        Action::ToFailed => "to_failed",
+        Action::OpenSource => "open_source",
+        Action::Adopt => "adopt",
+        Action::AdoptWithReason => "adopt_with_reason",
+        Action::Reject => "reject",
+        Action::Change => "change",
+        Action::Next => "next",
+        Action::Prev => "prev",
+        Action::Undo => "undo",
+        Action::Redo => "redo",
+        Action::Merge => "merge",
+        Action::Back => "back",
+        Action::Retry => "retry",
+        Action::Discard => "discard",
+        Action::RetryAll => "retry_all",
+    }
+}
+
 fn check_conflicts(bindings: &[Binding]) -> Result<(), Error> {
     for screen in [Screen::Inbox, Screen::Review, Screen::Failed] {
         let active: Vec<&Binding> = bindings
@@ -341,11 +391,11 @@ fn check_conflicts(bindings: &[Binding]) -> Result<(), Error> {
             for b2 in &active[i + 1..] {
                 if b1.seq == b2.seq {
                     return Err(Error::Invalid(format!(
-                        "{} 画面でキー '{}' が {:?} と {:?} で重なっています",
+                        "{} 画面でキー '{}' が {} と {} で重なっています",
                         screen_name(screen),
                         format_seq(b1.seq),
-                        b1.action,
-                        b2.action
+                        action_name(b1.action),
+                        action_name(b2.action)
                     )));
                 }
                 let prefix_conflict = match (b1.seq, b2.seq) {
@@ -355,12 +405,12 @@ fn check_conflicts(bindings: &[Binding]) -> Result<(), Error> {
                 };
                 if prefix_conflict {
                     return Err(Error::Invalid(format!(
-                        "{} 画面でキー '{}' ({:?}) と '{}' ({:?}) の先頭が重なっています",
+                        "{} 画面でキー '{}' ({}) と '{}' ({}) の先頭が重なっています",
                         screen_name(screen),
                         format_seq(b1.seq),
-                        b1.action,
+                        action_name(b1.action),
                         format_seq(b2.seq),
-                        b2.action
+                        action_name(b2.action)
                     )));
                 }
             }
@@ -380,7 +430,10 @@ fn screen_name(screen: Screen) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+
+    fn toml_val(s: &str) -> toml::Value {
+        toml::from_str(s).unwrap()
+    }
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -392,24 +445,14 @@ mod tests {
 
     #[test]
     fn keys_override_replaces_default() {
-        let mut map = BTreeMap::new();
-        let mut inbox = BTreeMap::new();
-        inbox.insert("delete".to_string(), vec!["D".to_string()]);
-        map.insert("inbox".to_string(), inbox);
-
-        let km = Keymap::from_config(&map).unwrap();
+        let km = Keymap::from_config(&toml_val("[inbox]\ndelete = [\"D\"]")).unwrap();
         assert_eq!(km.resolve(Screen::Inbox, None, key('D')), Resolved::Action(Action::Delete));
         assert_eq!(km.resolve(Screen::Inbox, None, key('d')), Resolved::Nothing);
     }
 
     #[test]
     fn keys_two_key_sequence() {
-        let mut map = BTreeMap::new();
-        let mut common = BTreeMap::new();
-        common.insert("top".to_string(), vec!["t t".to_string()]);
-        map.insert("common".to_string(), common);
-
-        let km = Keymap::from_config(&map).unwrap();
+        let km = Keymap::from_config(&toml_val("[common]\ntop = [\"t t\"]")).unwrap();
         assert_eq!(km.resolve(Screen::Inbox, None, key('t')), Resolved::Pending);
         assert_eq!(
             km.resolve(Screen::Inbox, Some(key('t')), key('t')),
@@ -419,48 +462,43 @@ mod tests {
     }
 
     #[test]
-    fn keys_reject_conflict() {
-        let mut map = BTreeMap::new();
-        let mut inbox = BTreeMap::new();
-        inbox.insert("delete".to_string(), vec!["j".to_string()]);
-        map.insert("inbox".to_string(), inbox);
-
-        assert!(Keymap::from_config(&map).is_err());
+    fn keys_reject_conflict_with_snake_case_names() {
+        let err = Keymap::from_config(&toml_val("[inbox]\ndelete = [\"j\"]")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("down") && msg.contains("delete"), "msg: {msg}");
+        assert!(!msg.contains("Down") && !msg.contains("Delete"), "msg: {msg}");
     }
 
     #[test]
     fn keys_reject_prefix_conflict() {
-        let mut map = BTreeMap::new();
-        let mut inbox = BTreeMap::new();
-        inbox.insert("delete".to_string(), vec!["g".to_string()]);
-        map.insert("inbox".to_string(), inbox);
-
-        assert!(Keymap::from_config(&map).is_err());
+        let err = Keymap::from_config(&toml_val("[inbox]\ndelete = [\"g\"]")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("top") && msg.contains("delete"), "msg: {msg}");
     }
 
     #[test]
     fn keys_reject_unknown_action_and_key() {
-        let mut map = BTreeMap::new();
-        let mut inbox = BTreeMap::new();
-        inbox.insert("nosuch".to_string(), vec!["x".to_string()]);
-        map.insert("inbox".to_string(), inbox);
-        assert!(Keymap::from_config(&map).is_err());
+        assert!(Keymap::from_config(&toml_val("[inbox]\nnosuch = [\"x\"]")).is_err());
+        assert!(Keymap::from_config(&toml_val("[inbox]\ndelete = [\"ctrl-\"]")).is_err());
+    }
 
-        let mut map2 = BTreeMap::new();
-        let mut inbox2 = BTreeMap::new();
-        inbox2.insert("delete".to_string(), vec!["ctrl-".to_string()]);
-        map2.insert("inbox".to_string(), inbox2);
-        assert!(Keymap::from_config(&map2).is_err());
+    #[test]
+    fn keys_reject_invalid_shape() {
+        let err = Keymap::from_config(&toml_val("[inbox]\ndown = \"j\"")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("inbox") && msg.contains("down"), "msg: {msg}");
+    }
+
+    #[test]
+    fn backtab_matches_with_shift_modifier() {
+        let km = Keymap::from_config(&toml_val("[review]\nprev = [\"backtab\"]")).unwrap();
+        let ev = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(km.resolve(Screen::Review, None, ev), Resolved::Action(Action::Prev));
     }
 
     #[test]
     fn ctrl_key_parses() {
-        let mut map = BTreeMap::new();
-        let mut review = BTreeMap::new();
-        review.insert("redo".to_string(), vec!["ctrl-y".to_string()]);
-        map.insert("review".to_string(), review);
-
-        let km = Keymap::from_config(&map).unwrap();
+        let km = Keymap::from_config(&toml_val("[review]\nredo = [\"ctrl-y\"]")).unwrap();
         assert_eq!(km.resolve(Screen::Review, None, ctrl('y')), Resolved::Action(Action::Redo));
     }
 }
