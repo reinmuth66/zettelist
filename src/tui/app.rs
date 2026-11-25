@@ -1,5 +1,7 @@
-use crate::notes::{InboxItem, Near, NewNote, NoteKind, SourceSummary};
+use crate::error::Error;
+use crate::notes::{InboxItem, Near, NewNote, Note, NoteKind, SourceSummary};
 use crate::ops::WriteOutcome;
+use crate::review::{Decision, HubSummary, Proposal, Rehubbed};
 use crate::source_ref::{kind_hint, source_url};
 use crate::tui::draft;
 use crate::tui::input::LineInput;
@@ -8,7 +10,7 @@ use crate::tui::store::Store;
 use crate::tui::theme::Theme;
 use chrono::{DateTime, Local, Utc};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub struct Settings {
     pub inbox_similarity: f32,
@@ -89,6 +91,25 @@ enum PromoteState {
     },
 }
 
+pub struct HubPicker {
+    pub hubs: Vec<HubSummary>,
+    pub cursor: usize,
+}
+
+enum ReviewEdit {
+    Decide {
+        cursor: usize,
+        key: String,
+        prev: Option<Decision>,
+        next: Option<Decision>,
+    },
+    Rehub {
+        cursor: usize,
+        hub_slug: String,
+        rehubbed: Rehubbed,
+    },
+}
+
 pub struct App {
     store: Box<dyn Store>,
     settings: Settings,
@@ -107,6 +128,16 @@ pub struct App {
     write_form: Option<WriteForm>,
     promote: Option<PromoteState>,
     confirm_delete: Option<Vec<(NoteKind, String)>>,
+    proposals: Vec<Proposal>,
+    review_decisions: BTreeMap<String, Decision>,
+    review_cursor: usize,
+    review_notes: HashMap<String, Note>,
+    hubs: Vec<HubSummary>,
+    review_undo: Vec<ReviewEdit>,
+    review_redo: Vec<ReviewEdit>,
+    review_reason: Option<LineInput>,
+    hub_picker: Option<HubPicker>,
+    confirm_merge: bool,
 }
 
 impl App {
@@ -129,6 +160,16 @@ impl App {
             write_form: None,
             promote: None,
             confirm_delete: None,
+            proposals: Vec::new(),
+            review_decisions: BTreeMap::new(),
+            review_cursor: 0,
+            review_notes: HashMap::new(),
+            hubs: Vec::new(),
+            review_undo: Vec::new(),
+            review_redo: Vec::new(),
+            review_reason: None,
+            hub_picker: None,
+            confirm_merge: false,
         };
         app.reload_inbox();
         app
@@ -217,6 +258,18 @@ impl App {
             self.handle_confirm_delete_key(key);
             return None;
         }
+        if self.review_reason.is_some() {
+            self.handle_review_reason_key(key);
+            return None;
+        }
+        if self.hub_picker.is_some() {
+            self.handle_hub_picker_key(key);
+            return None;
+        }
+        if self.confirm_merge {
+            self.handle_confirm_merge_key(key);
+            return None;
+        }
 
         let pending = self.pending_key.take();
         match self.settings.keys.resolve(self.screen, pending, key) {
@@ -230,6 +283,10 @@ impl App {
     }
 
     fn handle_action(&mut self, action: Action) -> Option<Effect> {
+        if self.screen == Screen::Review {
+            self.handle_review_action(action);
+            return None;
+        }
         if self.screen != Screen::Inbox {
             match action {
                 Action::Quit | Action::Back => {
@@ -322,6 +379,13 @@ impl App {
             Action::ToReview => {
                 self.screen = Screen::Review;
                 self.show_help = false;
+                self.review_cursor = 0;
+                self.review_undo.clear();
+                self.review_redo.clear();
+                self.review_reason = None;
+                self.hub_picker = None;
+                self.confirm_merge = false;
+                self.reload_review();
             }
             Action::ToFailed => {
                 self.screen = Screen::Failed;
@@ -423,6 +487,408 @@ impl App {
 
     pub fn confirm_delete_count(&self) -> Option<usize> {
         self.confirm_delete.as_ref().map(Vec::len)
+    }
+
+    pub fn proposals(&self) -> &[Proposal] {
+        &self.proposals
+    }
+
+    pub fn review_cursor(&self) -> usize {
+        self.review_cursor
+    }
+
+    pub fn current_proposal(&self) -> Option<&Proposal> {
+        self.proposals.get(self.review_cursor)
+    }
+
+    pub fn current_decision(&self) -> Option<&Decision> {
+        let prop = self.current_proposal()?;
+        self.review_decisions.get(&prop.key())
+    }
+
+    pub fn review_counts(&self) -> (usize, usize) {
+        let mut links = 0;
+        let mut hubs = 0;
+        for p in &self.proposals {
+            match p {
+                Proposal::Link { .. } => links += 1,
+                Proposal::Hub { .. } => hubs += 1,
+            }
+        }
+        (links, hubs)
+    }
+
+    pub fn review_note(&self, slug: &str) -> Option<&Note> {
+        self.review_notes.get(slug)
+    }
+
+    pub fn hub_title(&self, slug: &str) -> Option<&str> {
+        self.hubs
+            .iter()
+            .find(|h| h.slug == slug)
+            .map(|h| h.title.as_str())
+    }
+
+    pub fn review_reason(&self) -> Option<&LineInput> {
+        self.review_reason.as_ref()
+    }
+
+    pub fn hub_picker(&self) -> Option<&HubPicker> {
+        self.hub_picker.as_ref()
+    }
+
+    pub fn confirm_merge_counts(&self) -> Option<(usize, usize)> {
+        if !self.confirm_merge {
+            return None;
+        }
+        let mut adopted = 0;
+        let mut rejected = 0;
+        for p in &self.proposals {
+            match self.review_decisions.get(&p.key()) {
+                Some(Decision::Adopt { .. }) => adopted += 1,
+                Some(Decision::Reject) => rejected += 1,
+                None => {}
+            }
+        }
+        Some((adopted, rejected))
+    }
+
+    pub fn reload_review(&mut self) {
+        self.detail_scroll = 0;
+        match self.store.proposals() {
+            Ok((props, state)) => {
+                self.review_count = props.len();
+                self.proposals = props;
+                self.review_decisions = state.decisions;
+                if self.proposals.is_empty() {
+                    self.review_cursor = 0;
+                } else {
+                    self.review_cursor = self.review_cursor.min(self.proposals.len() - 1);
+                }
+            }
+            Err(e) => {
+                self.proposals.clear();
+                self.review_decisions.clear();
+                self.review_cursor = 0;
+                self.record_error(e.to_string());
+            }
+        }
+        match self.store.hubs() {
+            Ok(hubs) => self.hubs = hubs,
+            Err(e) => self.record_error(e.to_string()),
+        }
+        self.ensure_review_notes();
+    }
+
+    fn ensure_review_notes(&mut self) {
+        let Some(prop) = self.proposals.get(self.review_cursor).cloned() else {
+            return;
+        };
+        match prop {
+            Proposal::Link { from, to, .. } => {
+                self.ensure_note(&from);
+                self.ensure_note(&to);
+            }
+            Proposal::Hub { note, .. } => {
+                self.ensure_note(&note);
+            }
+        }
+    }
+
+    fn ensure_note(&mut self, slug: &str) {
+        if self.review_notes.contains_key(slug) {
+            return;
+        }
+        match self.store.note(slug) {
+            Ok(note) => {
+                self.review_notes.insert(slug.to_string(), note);
+            }
+            Err(e) => self.record_error(e.to_string()),
+        }
+    }
+
+    fn handle_review_action(&mut self, action: Action) {
+        match action {
+            Action::Quit | Action::Back => {
+                self.screen = Screen::Inbox;
+                self.show_help = false;
+                self.reload_inbox();
+                return;
+            }
+            Action::Help => {
+                self.show_help = !self.show_help;
+                return;
+            }
+            _ => {}
+        }
+
+        if self.proposals.is_empty() {
+            return;
+        }
+
+        match action {
+            Action::Next => {
+                if self.review_cursor + 1 < self.proposals.len() {
+                    self.review_cursor += 1;
+                    self.detail_scroll = 0;
+                    self.ensure_review_notes();
+                }
+            }
+            Action::Prev => {
+                if self.review_cursor > 0 {
+                    self.review_cursor -= 1;
+                    self.detail_scroll = 0;
+                    self.ensure_review_notes();
+                }
+            }
+            Action::ScrollDown => {
+                self.detail_scroll = self.detail_scroll.saturating_add(5);
+            }
+            Action::ScrollUp => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(5);
+            }
+            Action::Adopt => {
+                self.apply_review_decision(Decision::Adopt { reason: None });
+            }
+            Action::AdoptWithReason => {
+                if matches!(self.current_proposal(), Some(Proposal::Link { .. })) {
+                    self.pending_key = None;
+                    self.review_reason = Some(LineInput::new(""));
+                }
+            }
+            Action::Reject => {
+                self.apply_review_decision(Decision::Reject);
+            }
+            Action::Change => {
+                if let Some(Proposal::Hub { hub, .. }) = self.current_proposal() {
+                    let hubs = self
+                        .hubs
+                        .iter()
+                        .filter(|h| h.slug != *hub)
+                        .cloned()
+                        .collect();
+                    self.pending_key = None;
+                    self.hub_picker = Some(HubPicker { hubs, cursor: 0 });
+                }
+            }
+            Action::Undo => self.undo_review(),
+            Action::Redo => self.redo_review(),
+            Action::Merge => {
+                self.pending_key = None;
+                self.confirm_merge = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_review_decision(&mut self, decision: Decision) {
+        let Some(prop) = self.current_proposal().cloned() else {
+            return;
+        };
+        let key = prop.key();
+        let prev = self.review_decisions.get(&key).cloned();
+        match self.store.decide(&key, Some(decision.clone())) {
+            Ok(()) => {
+                self.review_decisions.insert(key.clone(), decision.clone());
+                self.review_undo.push(ReviewEdit::Decide {
+                    cursor: self.review_cursor,
+                    key,
+                    prev,
+                    next: Some(decision),
+                });
+                self.review_redo.clear();
+                if self.review_cursor + 1 < self.proposals.len() {
+                    self.review_cursor += 1;
+                    self.detail_scroll = 0;
+                    self.ensure_review_notes();
+                }
+            }
+            Err(e) => self.handle_review_error(e),
+        }
+    }
+
+    fn set_cached_decision(&mut self, key: &str, decision: Option<Decision>) {
+        match decision {
+            Some(d) => {
+                self.review_decisions.insert(key.to_string(), d);
+            }
+            None => {
+                self.review_decisions.remove(key);
+            }
+        }
+    }
+
+    fn handle_review_error(&mut self, err: Error) {
+        match err {
+            Error::Invalid(msg) => {
+                self.message = Some(msg);
+                self.reload_review();
+            }
+            other => {
+                self.message = Some(other.to_string());
+            }
+        }
+    }
+
+    fn undo_review(&mut self) {
+        let Some(edit) = self.review_undo.pop() else {
+            return;
+        };
+        match edit {
+            ReviewEdit::Decide { cursor, key, prev, next } => {
+                match self.store.decide(&key, prev.clone()) {
+                    Ok(()) => {
+                        self.set_cached_decision(&key, prev.clone());
+                        self.review_redo.push(ReviewEdit::Decide { cursor, key, prev, next });
+                        if !self.proposals.is_empty() {
+                            self.review_cursor = cursor.min(self.proposals.len() - 1);
+                        }
+                        self.detail_scroll = 0;
+                        self.ensure_review_notes();
+                    }
+                    Err(e) => self.handle_review_error(e),
+                }
+            }
+            ReviewEdit::Rehub { cursor, hub_slug, rehubbed } => {
+                match self.store.unrehub(&rehubbed) {
+                    Ok(()) => {
+                        self.review_redo.push(ReviewEdit::Rehub { cursor, hub_slug, rehubbed });
+                        self.review_cursor = cursor;
+                        self.reload_review();
+                    }
+                    Err(e) => self.handle_review_error(e),
+                }
+            }
+        }
+    }
+
+    fn redo_review(&mut self) {
+        let Some(edit) = self.review_redo.pop() else {
+            return;
+        };
+        match edit {
+            ReviewEdit::Decide { cursor, key, prev, next } => {
+                match self.store.decide(&key, next.clone()) {
+                    Ok(()) => {
+                        self.set_cached_decision(&key, next.clone());
+                        self.review_undo.push(ReviewEdit::Decide { cursor, key, prev, next });
+                        if !self.proposals.is_empty() {
+                            self.review_cursor = cursor.min(self.proposals.len() - 1);
+                        }
+                        self.detail_scroll = 0;
+                        self.ensure_review_notes();
+                    }
+                    Err(e) => self.handle_review_error(e),
+                }
+            }
+            ReviewEdit::Rehub { cursor, hub_slug, rehubbed } => {
+                match self.store.rehub(&rehubbed.old_key, &hub_slug) {
+                    Ok(new_rehubbed) => {
+                        self.review_undo.push(ReviewEdit::Rehub {
+                            cursor,
+                            hub_slug,
+                            rehubbed: new_rehubbed,
+                        });
+                        self.review_cursor = cursor;
+                        self.reload_review();
+                    }
+                    Err(e) => self.handle_review_error(e),
+                }
+            }
+        }
+    }
+
+    fn handle_review_reason_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.review_reason = None;
+            }
+            KeyCode::Enter => {
+                let Some(input) = self.review_reason.take() else {
+                    return;
+                };
+                let trimmed = input.text().trim();
+                let reason = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+                self.apply_review_decision(Decision::Adopt { reason });
+            }
+            _ => {
+                if let Some(input) = self.review_reason.as_mut() {
+                    input.handle(key);
+                }
+            }
+        }
+    }
+
+    fn handle_hub_picker_key(&mut self, key: KeyEvent) {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => {
+                self.hub_picker = None;
+            }
+            (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => {
+                if let Some(p) = self.hub_picker.as_mut() {
+                    if p.cursor + 1 < p.hubs.len() {
+                        p.cursor += 1;
+                    }
+                }
+            }
+            (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => {
+                if let Some(p) = self.hub_picker.as_mut() {
+                    if p.cursor > 0 {
+                        p.cursor -= 1;
+                    }
+                }
+            }
+            (KeyCode::Enter, _) => {
+                let Some(picker) = self.hub_picker.take() else {
+                    return;
+                };
+                let Some(chosen) = picker.hubs.get(picker.cursor).cloned() else {
+                    return;
+                };
+                let Some(prop) = self.current_proposal().cloned() else {
+                    return;
+                };
+                let key = prop.key();
+                match self.store.rehub(&key, &chosen.slug) {
+                    Ok(rehubbed) => {
+                        self.review_undo.push(ReviewEdit::Rehub {
+                            cursor: self.review_cursor,
+                            hub_slug: chosen.slug,
+                            rehubbed,
+                        });
+                        self.review_redo.clear();
+                        self.reload_review();
+                    }
+                    Err(e) => self.handle_review_error(e),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_confirm_merge_key(&mut self, key: KeyEvent) {
+        self.confirm_merge = false;
+        if matches!((key.code, key.modifiers), (KeyCode::Char('y'), KeyModifiers::NONE)) {
+            match self.store.merge() {
+                Ok(done) => {
+                    let s = done.value;
+                    let mut msg = format!("マージしました (リンク {} 本、ハブ {} 件)", s.links, s.hubs);
+                    for w in [done.queue_warning, done.worker_warning].into_iter().flatten() {
+                        msg.push_str(" / ");
+                        msg.push_str(&w);
+                    }
+                    self.message = Some(msg);
+                    self.review_undo.clear();
+                    self.review_redo.clear();
+                    self.reload_review();
+                }
+                Err(e) => self.handle_review_error(e),
+            }
+        }
     }
 
     fn open_promote_title(&mut self) {
@@ -703,6 +1169,58 @@ impl App {
                 ("y".to_string(), "削除"),
                 ("他".to_string(), "中止"),
             ];
+        }
+        if self.review_reason.is_some() {
+            return vec![
+                ("Enter".to_string(), "決定"),
+                ("Esc".to_string(), "中止"),
+            ];
+        }
+        if self.hub_picker.is_some() {
+            return vec![
+                ("j/k".to_string(), "選ぶ"),
+                ("Enter".to_string(), "決定"),
+                ("Esc".to_string(), "中止"),
+            ];
+        }
+        if self.confirm_merge {
+            return vec![
+                ("y".to_string(), "マージ"),
+                ("他".to_string(), "中止"),
+            ];
+        }
+        if self.screen == Screen::Review {
+            let mut pairs: Vec<(Action, &'static str)> = Vec::new();
+            if let Some(prop) = self.current_proposal() {
+                pairs.push((Action::Adopt, "採用"));
+                if matches!(prop, Proposal::Link { .. }) {
+                    pairs.push((Action::AdoptWithReason, "理由付き採用"));
+                }
+                pairs.push((Action::Reject, "却下"));
+                if matches!(prop, Proposal::Hub { .. }) {
+                    pairs.push((Action::Change, "Hub変更"));
+                }
+                pairs.extend([
+                    (Action::Next, "次へ"),
+                    (Action::Prev, "前へ"),
+                    (Action::Undo, "取消"),
+                    (Action::Redo, "やり直し"),
+                    (Action::Merge, "マージ"),
+                ]);
+            }
+            pairs.extend([
+                (Action::Back, "戻る"),
+                (Action::Help, "ヘルプ"),
+            ]);
+            return pairs
+                .into_iter()
+                .filter_map(|(act, desc)| {
+                    self.settings
+                        .keys
+                        .label(self.screen, act)
+                        .map(|k| (k, desc))
+                })
+                .collect();
         }
         if self.screen == Screen::Inbox {
             let mut pairs: Vec<(Action, &'static str)> = vec![
@@ -1160,5 +1678,265 @@ mod tests {
             app.on_key(key('o')),
             Some(Effect::Open("https://doi.org/10.1/x".to_string()))
         );
+    }
+
+    fn review_store() -> FakeStore {
+        use crate::notes::Note;
+        use crate::review::{HubSummary, Proposal};
+
+        let mut store = three_store();
+        store.proposals = vec![
+            Proposal::Link {
+                from: "a".into(),
+                to: "b".into(),
+                similarity: 0.82,
+            },
+            Proposal::Link {
+                from: "a".into(),
+                to: "c".into(),
+                similarity: 0.71,
+            },
+            Proposal::Hub {
+                hub: "hub1".into(),
+                note: "a".into(),
+            },
+        ];
+        store.notes.insert(
+            "a".into(),
+            Note {
+                kind: NoteKind::Permanent,
+                slug: "a".into(),
+                title: Some("ノートA".into()),
+                body: "Aの本文".into(),
+                created: Utc::now(),
+            },
+        );
+        store.notes.insert(
+            "b".into(),
+            Note {
+                kind: NoteKind::Permanent,
+                slug: "b".into(),
+                title: Some("ノートB".into()),
+                body: "Bの本文".into(),
+            created: Utc::now(),
+            },
+        );
+        store.notes.insert(
+            "c".into(),
+            Note {
+                kind: NoteKind::Permanent,
+                slug: "c".into(),
+                title: Some("ノートC".into()),
+                body: "Cの本文".into(),
+                created: Utc::now(),
+            },
+        );
+        store.hubs = vec![
+            HubSummary {
+                slug: "hub1".into(),
+                title: "最初のHub".into(),
+            },
+            HubSummary {
+                slug: "hub2".into(),
+                title: "別のHub".into(),
+            },
+        ];
+        store
+    }
+
+    #[test]
+    fn adopt_records_and_moves_next() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        app.on_key(key('a'));
+        assert_eq!(app.review_cursor(), 1);
+        let st = store.borrow();
+        assert_eq!(
+            st.review_state.decisions.get("link:a:b"),
+            Some(&crate::review::Decision::Adopt { reason: None })
+        );
+    }
+
+    #[test]
+    fn adopt_with_reason() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        app.on_key(key('A'));
+        type_text(&mut app, "同じ主張");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.review_cursor(), 1);
+        let st = store.borrow();
+        assert_eq!(
+            st.review_state.decisions.get("link:a:b"),
+            Some(&crate::review::Decision::Adopt {
+                reason: Some("同じ主張".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn adopt_with_blank_reason_is_none() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        app.on_key(key('A'));
+        type_text(&mut app, "  ");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let st = store.borrow();
+        assert_eq!(
+            st.review_state.decisions.get("link:a:b"),
+            Some(&crate::review::Decision::Adopt { reason: None })
+        );
+    }
+
+    #[test]
+    fn capital_a_does_nothing_on_hub() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        app.on_key(key('n'));
+        app.on_key(key('n'));
+        assert_eq!(app.review_cursor(), 2);
+        app.on_key(key('A'));
+        assert!(app.review_reason().is_none());
+        assert!(!store.borrow().calls.iter().any(|c| c == "decide"));
+    }
+
+    #[test]
+    fn reject_records_and_moves_next() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        app.on_key(key('d'));
+        assert_eq!(app.review_cursor(), 1);
+        let st = store.borrow();
+        assert_eq!(
+            st.review_state.decisions.get("link:a:b"),
+            Some(&crate::review::Decision::Reject)
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_decision() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        app.on_key(key('a'));
+        assert_eq!(app.review_cursor(), 1);
+
+        app.on_key(key('u'));
+        assert_eq!(app.review_cursor(), 0);
+        assert_eq!(store.borrow().review_state.decisions.get("link:a:b"), None);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(
+            store.borrow().review_state.decisions.get("link:a:b"),
+            Some(&crate::review::Decision::Adopt { reason: None })
+        );
+    }
+
+    #[test]
+    fn new_decision_clears_redo() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        app.on_key(key('a'));
+        app.on_key(key('u'));
+        app.on_key(key('d'));
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(
+            store.borrow().review_state.decisions.get("link:a:b"),
+            Some(&crate::review::Decision::Reject)
+        );
+    }
+
+    #[test]
+    fn change_hub_calls_rehub_and_undo_calls_unrehub() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        app.on_key(key('n'));
+        app.on_key(key('n'));
+        app.on_key(key('c'));
+        assert!(app.hub_picker().is_some());
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.hub_picker().is_none());
+        assert!(store.borrow().calls.iter().any(|c| c == "rehub"));
+
+        app.on_key(key('u'));
+        assert!(store.borrow().calls.iter().any(|c| c == "unrehub"));
+
+        store.borrow_mut().calls.clear();
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(store.borrow().calls.iter().any(|c| c == "rehub"));
+    }
+
+    #[test]
+    fn merge_asks_then_merges() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        app.on_key(key('a'));
+        app.on_key(key('m'));
+        assert!(!store.borrow().calls.iter().any(|c| c == "merge"));
+        assert!(app.confirm_merge_counts().is_some());
+
+        app.on_key(key('y'));
+        assert!(store.borrow().calls.iter().any(|c| c == "merge"));
+        assert!(app.message().is_some_and(|m| m.contains("マージしました")));
+    }
+
+    #[test]
+    fn vanished_proposal_reloads() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(review_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('r'));
+        store.borrow_mut().calls.clear();
+        store.borrow_mut().fail_with = Some(Error::Invalid("提案 'link:a:b' はありません".into()));
+
+        app.on_key(key('a'));
+        assert_eq!(app.message(), Some("提案 'link:a:b' はありません"));
+        assert!(store.borrow().calls.iter().any(|c| c == "proposals"));
+    }
+
+    #[test]
+    fn esc_returns_to_inbox() {
+        let mut app = App::new(Box::new(review_store()), settings());
+        app.on_key(key('r'));
+        assert_eq!(app.screen(), Screen::Review);
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.screen(), Screen::Inbox);
     }
 }

@@ -1,4 +1,5 @@
 use crate::notes::NoteKind;
+use crate::review::{Decision, Proposal};
 use crate::tui::app::{App, WriteField, WriteForm};
 use crate::tui::keys::Screen;
 use crate::tui::text::{short_date, truncate};
@@ -19,6 +20,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let has_write = app.write_form().is_some();
     let has_promote = app.promote_title().is_some();
     let has_confirm = app.confirm_delete_count().is_some();
+    let has_reason = app.review_reason().is_some();
+    let has_confirm_merge = app.confirm_merge_counts().is_some();
     let has_msg = app.message().is_some();
     let mut constraints = vec![Constraint::Length(1), Constraint::Min(0)];
     if has_write {
@@ -28,6 +31,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         constraints.push(Constraint::Length(3));
     }
     if has_confirm {
+        constraints.push(Constraint::Length(1));
+    }
+    if has_reason {
+        constraints.push(Constraint::Length(1));
+    }
+    if has_confirm_merge {
         constraints.push(Constraint::Length(1));
     }
     if has_msg {
@@ -43,7 +52,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     match app.screen() {
         Screen::Inbox => draw_inbox(frame, app, main_area),
-        Screen::Review => draw_placeholder(frame, app, main_area, "review 画面 (Esc または q で戻る)"),
+        Screen::Review => draw_review(frame, app, main_area),
         Screen::Failed => draw_placeholder(frame, app, main_area, "失敗の一覧 (Esc または q で戻る)"),
     }
 
@@ -62,6 +71,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
         frame.render_widget(p, chunks[idx]);
         idx += 1;
     }
+    if has_reason {
+        draw_review_reason(frame, app, chunks[idx]);
+        idx += 1;
+    }
+    if let Some((adopted, rejected)) = app.confirm_merge_counts() {
+        let p = Paragraph::new(format!(
+            "採用 {adopted} 件、却下 {rejected} 件を main に入れます。よろしいですか [y/N]"
+        ))
+        .style(Style::default().fg(app.settings().theme.error));
+        frame.render_widget(p, chunks[idx]);
+        idx += 1;
+    }
     if has_msg {
         if let Some(msg) = app.message() {
             let p = Paragraph::new(msg).style(Style::default().fg(app.settings().theme.error));
@@ -71,12 +92,43 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     draw_footer(frame, app, chunks[idx]);
 
+    if app.hub_picker().is_some() {
+        draw_hub_picker(frame, app, area);
+    }
     if app.show_help() {
         draw_help(frame, app, area);
     }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let style = Style::default()
+        .fg(app.settings().theme.header)
+        .add_modifier(Modifier::BOLD);
+    if app.screen() == Screen::Review {
+        let (links, hubs) = app.review_counts();
+        let left = format!(
+            "review {} 件  (links {} / hub {})",
+            app.proposals().len(),
+            links,
+            hubs
+        );
+        let text = if let Some(Proposal::Link { similarity, .. }) = app.current_proposal() {
+            let right = format!("(近さ {:.2})", similarity);
+            let total_w = area.width as usize;
+            let lw = left.width();
+            let rw = right.width();
+            if lw + 1 + rw <= total_w {
+                let pad = " ".repeat(total_w - lw - rw);
+                format!("{left}{pad}{right}")
+            } else {
+                truncate(&format!("{left} {right}"), total_w)
+            }
+        } else {
+            left
+        };
+        frame.render_widget(Paragraph::new(text).style(style), area);
+        return;
+    }
     let now = Utc::now();
     let text = format!(
         "inbox {} 件 (30日超 {})     review {} 件     失敗 {} 件",
@@ -85,9 +137,6 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         app.review_count(),
         app.failed_count()
     );
-    let style = Style::default()
-        .fg(app.settings().theme.header)
-        .add_modifier(Modifier::BOLD);
     frame.render_widget(Paragraph::new(text).style(style), area);
 }
 
@@ -242,6 +291,173 @@ fn draw_inbox_detail(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll(), 0));
     frame.render_widget(detail, area);
+}
+
+fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(prop) = app.current_proposal() else {
+        draw_placeholder(frame, app, area, "提案はありません");
+        return;
+    };
+
+    let (decision_area, body_area) = if app.current_decision().is_some() && area.height > 1 {
+        let split = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+        (Some(split[0]), split[1])
+    } else {
+        (None, area)
+    };
+
+    if let (Some(d_area), Some(dec)) = (decision_area, app.current_decision()) {
+        let theme = &app.settings().theme;
+        let (label, color) = match dec {
+            Decision::Adopt { reason: None } => ("● 採用".to_string(), theme.adopted),
+            Decision::Adopt { reason: Some(r) } => (format!("● 採用 (理由: {r})"), theme.adopted),
+            Decision::Reject => ("× 却下".to_string(), theme.rejected),
+        };
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            d_area,
+        );
+    }
+
+    match prop {
+        Proposal::Link { from, to, .. } => {
+            if body_area.width < 80 {
+                render_review_note(frame, app, from, " 新しいノート ", body_area);
+            } else {
+                let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(body_area);
+                render_review_note(frame, app, from, " 新しいノート ", cols[0]);
+                render_review_note(frame, app, to, " 候補 ", cols[1]);
+            }
+        }
+        Proposal::Hub { hub, note } => {
+            if body_area.width < 80 {
+                render_review_note(frame, app, note, " 新しいノート ", body_area);
+            } else {
+                let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(body_area);
+                render_review_note(frame, app, note, " 新しいノート ", cols[0]);
+                render_review_hub(frame, app, hub, cols[1]);
+            }
+        }
+    }
+}
+
+fn render_review_note(frame: &mut Frame, app: &App, slug: &str, title: &str, area: Rect) {
+    let theme = &app.settings().theme;
+    let block = Block::bordered().title(title);
+    let mut lines = Vec::new();
+    if let Some(note) = app.review_note(slug) {
+        if let Some(t) = &note.title {
+            lines.push(Line::from(Span::styled(
+                t.clone(),
+                Style::default().fg(theme.header).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+        }
+        for l in note.body.lines() {
+            lines.push(Line::from(l.to_string()));
+        }
+        if lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            slug.to_string(),
+            Style::default().fg(theme.dim),
+        )));
+    }
+    let p = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.detail_scroll(), 0));
+    frame.render_widget(p, area);
+}
+
+fn render_review_hub(frame: &mut Frame, app: &App, hub_slug: &str, area: Rect) {
+    let theme = &app.settings().theme;
+    let block = Block::bordered().title(" Hub ");
+    let mut lines = Vec::new();
+    if let Some(title) = app.hub_title(hub_slug) {
+        lines.push(Line::from(Span::styled(
+            title.to_string(),
+            Style::default().fg(theme.header).add_modifier(Modifier::BOLD),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        hub_slug.to_string(),
+        Style::default().fg(theme.dim),
+    )));
+    let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    frame.render_widget(p, area);
+}
+
+fn draw_review_reason(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(input) = app.review_reason() else {
+        return;
+    };
+    let theme = &app.settings().theme;
+    let label = "理由: ";
+    let label_w = label.width() as u16;
+    let field_w = area.width.saturating_sub(label_w);
+    let (text, col) = input.view(field_w);
+    let line = Line::from(vec![
+        Span::styled(
+            label,
+            Style::default().fg(theme.cursor).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(text),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+    if area.width > 0 {
+        let cx = (area.x + label_w + col).min(area.x + area.width.saturating_sub(1));
+        frame.set_cursor_position((cx, area.y));
+    }
+}
+
+fn draw_hub_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(picker) = app.hub_picker() else {
+        return;
+    };
+    let theme = &app.settings().theme;
+    let w = area.width.min(50);
+    let h = area.height.min((picker.hubs.len() as u16 + 2).clamp(4, 14));
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let popup = Rect::new(x, y, w, h);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().title(" Hub を選ぶ ");
+    if picker.hubs.is_empty() {
+        let p = Paragraph::new("他の Hub はありません")
+            .style(Style::default().fg(theme.dim))
+            .block(block);
+        frame.render_widget(p, popup);
+        return;
+    }
+
+    let items: Vec<ListItem> = picker
+        .hubs
+        .iter()
+        .enumerate()
+        .map(|(i, hub)| {
+            let is_cur = i == picker.cursor;
+            let prefix = if is_cur { "> " } else { "  " };
+            let style = if is_cur {
+                Style::default().fg(theme.cursor).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!("{prefix}{} ({})", hub.title, hub.slug),
+                style,
+            )))
+        })
+        .collect();
+    let list = List::new(items).block(block);
+    let mut state = ListState::default();
+    state.select(Some(picker.cursor));
+    frame.render_stateful_widget(list, popup, &mut state);
 }
 
 fn draw_placeholder(frame: &mut Frame, app: &App, area: Rect, label: &str) {
@@ -580,5 +796,82 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         let screen2 = render(&app, 100, 20);
         assert!(screen2.contains("1 件消します。よろしいですか [y/N]"), "{screen2}");
+    }
+
+    fn review_store() -> FakeStore {
+        use crate::notes::Note;
+        use crate::review::{HubSummary, Proposal};
+
+        let mut store = three_store();
+        store.proposals = vec![
+            Proposal::Link {
+                from: "a".into(),
+                to: "b".into(),
+                similarity: 0.82,
+            },
+            Proposal::Hub {
+                hub: "hub1".into(),
+                note: "a".into(),
+            },
+        ];
+        store.notes.insert(
+            "a".into(),
+            Note {
+                kind: NoteKind::Permanent,
+                slug: "a".into(),
+                title: Some("ノートA".into()),
+                body: "Aの本文".into(),
+                created: Utc::now(),
+            },
+        );
+        store.notes.insert(
+            "b".into(),
+            Note {
+                kind: NoteKind::Permanent,
+                slug: "b".into(),
+                title: Some("ノートB".into()),
+                body: "Bの本文".into(),
+                created: Utc::now(),
+            },
+        );
+        store.hubs = vec![HubSummary {
+            slug: "hub1".into(),
+            title: "最初のHub".into(),
+        }];
+        store
+    }
+
+    #[test]
+    fn link_proposal_shows_both_notes_and_similarity() {
+        let mut app = App::new(Box::new(review_store()), settings());
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        let screen = render(&app, 100, 20);
+        assert!(screen.contains("ノートA"), "{screen}");
+        assert!(screen.contains("ノートB"), "{screen}");
+        assert!(screen.contains("近さ 0.82"), "{screen}");
+    }
+
+    #[test]
+    fn footer_hides_keys_not_for_this_proposal() {
+        let mut app = App::new(Box::new(review_store()), settings());
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        let link_screen = render(&app, 100, 20);
+        let link_footer = link_screen.lines().last().unwrap_or("");
+        assert!(link_footer.contains("[A]"), "link_footer: {link_footer}");
+        assert!(!link_footer.contains("[c]"), "link_footer: {link_footer}");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let hub_screen = render(&app, 100, 20);
+        let hub_footer = hub_screen.lines().last().unwrap_or("");
+        assert!(!hub_footer.contains("[A]"), "hub_footer: {hub_footer}");
+        assert!(hub_footer.contains("[c]"), "hub_footer: {hub_footer}");
+    }
+
+    #[test]
+    fn no_proposals_message() {
+        let mut app = App::new(Box::new(FakeStore::default()), settings());
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        let screen = render(&app, 100, 20);
+        assert!(screen.contains("提案はありません"), "{screen}");
     }
 }
