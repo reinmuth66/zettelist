@@ -288,13 +288,17 @@ fn fail(json: bool, e: &Error) -> ExitCode {
 fn dispatch(json: bool, action: Action) -> Result<(), Error> {
     match action {
         Action::Tui => {
+            use std::io::IsTerminal;
             if json {
                 return Err(Error::Invalid(
-                    "TUI はまだありません。操作は --inbox などのオプションで行います".into(),
+                    "--json では TUI を起動できません。操作のオプションか本文を渡します".into(),
                 ));
             }
-            println!("TUI はまだありません");
-            Ok(())
+            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                return Err(Error::Invalid("TUI は端末で起動します".into()));
+            }
+            let ctx = Ctx::from_env()?;
+            crate::tui::run(ctx)
         }
         Action::Backup => backup_now(json),
         Action::Worker { once } => {

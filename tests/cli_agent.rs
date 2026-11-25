@@ -1089,6 +1089,6 @@ fn json_without_action_is_an_error_not_success() {
     assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
     let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
     assert_eq!(err["kind"], "invalid");
-    assert!(err["error"].as_str().is_some_and(|m| m.contains("TUI はまだありません")), "{err}");
+    assert!(err["error"].as_str().is_some_and(|m| m.contains("TUI を起動できません")), "{err}");
     assert!(output.stdout.is_empty());
 }
