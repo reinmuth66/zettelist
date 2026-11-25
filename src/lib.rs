@@ -5,6 +5,7 @@ pub mod embed;
 pub mod error;
 pub mod notes;
 pub mod omnigraph;
+pub mod ops;
 pub mod paths;
 pub mod propose;
 pub mod queue;
