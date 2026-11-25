@@ -514,3 +514,25 @@ fn proposing_after_deletion_still_works() {
     let p = propose_link(&og, &a, &b, 0.9);
     assert_eq!(list_proposals(&og).unwrap(), [p]);
 }
+
+#[test]
+fn apply_survives_permanent_recreated_with_same_slug() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let c = permanent(&og, "C", 2);
+    let p = propose_link(&og, &a, &c, 0.8);
+    save_decisions(&state_path(&s), vec![(&p, adopt())]);
+    delete_on_main(&og, "Permanent", &c);
+    og.load(
+        "main",
+        &[json!({"type":"Permanent","data":{"slug":c,"title":"C2","body":"作り直し","created":"2026-11-20T12:00:00Z"}})],
+    )
+    .unwrap();
+
+    // エッジは slug で結ばれるので、作り直したノードに付く (orphan_edge にならない)
+    let summary = apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(summary, Summary { links: 1, hubs: 0 });
+    assert_eq!(links(&og, "main"), [(a, c, None)]);
+}
