@@ -2,6 +2,7 @@
 //! ファイルがない、または項目が書かれていないときは既定値を使う。
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +14,8 @@ pub struct Config {
     pub embed: EmbedConfig,
     pub link: LinkConfig,
     pub ui: UiConfig,
+    pub theme: BTreeMap<String, String>,
+    pub keys: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,8 +171,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_sections_are_ignored() {
-        assert!(Config::from_toml_str("[theme]\nx = \"red\"\n[keys]\ny = \"z\"\n", Path::new("/h")).is_ok());
+    fn unknown_tables_are_ignored() {
+        assert!(Config::from_toml_str("[unknown]\nx = 1\n", Path::new("/h")).is_ok());
+    }
+
+    #[test]
+    fn theme_and_keys_are_read() {
+        let c = Config::from_toml_str(
+            "[theme]\nsimilar = \"red\"\n[keys.inbox]\ndelete = [\"D\"]\n",
+            Path::new("/h"),
+        )
+        .unwrap();
+        assert_eq!(c.theme.get("similar").map(String::as_str), Some("red"));
+        assert_eq!(
+            c.keys.get("inbox").and_then(|m| m.get("delete")),
+            Some(&vec!["D".to_string()])
+        );
     }
 
     #[test]

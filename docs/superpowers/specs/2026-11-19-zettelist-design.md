@@ -360,9 +360,16 @@ inbox_similarity = 0.0    # inbox で「似ている」と示す近さ。仮の�
 [ui]
 locator = false           # true で TUI の入力欄に位置の欄を出す
 
-[theme]                   # 色の割り当て。ANSI の 16 色の名前で書く。項目は builder が決める
+[theme]                    # 色の割り当て。ANSI の 16 色 (black..white、bright_*、default) の名前で書く
+similar = "cyan"           # cursor, selected, similar, old, dim, header, error, adopted, rejected
+old     = "bright_black"
 
-[keys]                    # キー割り当て。形式は builder が決める
+[keys.common]              # 節は common, inbox, review, failed。動作は Action の snake_case
+down = ["j", "down"]       # 既定のキーを置き換える。1 文字、名前 (space 等)、ctrl-<文字>
+top  = ["g g"]             # 2 つのキーの並びは空白で区切る
+
+[keys.review]
+adopt_with_reason = ["A"]
 ```
 
 - 埋め込み (確認で分かったこと。`docs/superpowers/notes/2026-11-19-omnigraph-check.md`):
@@ -414,9 +421,9 @@ locator = false           # true で TUI の入力欄に位置の欄を出す
 - 待ち行列のファイルの形式と、worker の排他の方法
 - `similarity` の型
 - Hub の埋め込みの持ち方
-- キー割り当ての設定ファイルの形式
+- キー割り当ての設定ファイルの形式 (計画 3 で決定: `[keys.<節>]` (`common`, `inbox`, `review`, `failed`) の下に `<動作の snake_case> = ["..."]` で書く。キーは 1 文字・名前 (`space` `enter` `esc` `tab` `backtab` `up` `down` `left` `right` `backspace`)・`ctrl-<1 文字>`、2 つまでの並びは空白区切り。書いた動作の既定を置き換える)
 - Crossref の `type` と `kind` の対応表、URL のドメインと `kind` の対応表
-- ISBN の書誌検索ページの URL
+- ISBN の書誌検索ページの URL (計画 3 で決定: `https://books.google.com/books?vid=ISBN<ISBN>`)
 
 ## 最初の確認の結果 (2026-11-20)
 

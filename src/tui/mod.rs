@@ -27,11 +27,13 @@ impl Drop for TerminalGuard {
 
 /// TUI を起動し、終了するまで画面を描画してキー入力を処理する。
 pub fn run(ctx: Ctx) -> Result<(), Error> {
+    let theme = Theme::from_config(&ctx.config.theme)?;
+    let keys = Keymap::from_config(&ctx.config.keys)?;
     let settings = Settings {
         inbox_similarity: ctx.config.link.inbox_similarity,
         locator: ctx.config.ui.locator,
-        theme: Theme::default(),
-        keys: Keymap::default(),
+        theme,
+        keys,
     };
     let mut app = App::new(Box::new(CtxStore(ctx)), settings);
     let mut terminal = ratatui::init();
