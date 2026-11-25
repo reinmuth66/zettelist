@@ -457,3 +457,82 @@ fn adopted_reinsert_with_deleted_endpoint_is_dropped() {
     assert!(list_proposals(&og).unwrap().is_empty());
     assert_eq!(ReviewState::load(&state_path(&s)).unwrap(), ReviewState::default());
 }
+
+/// main から消す (Studio で消したのと同じ)。つながるエッジは main から一緒に消える。
+fn delete_on_main(og: &Omnigraph, node: &str, slug: &str) {
+    let q = format!("query d($s: String) {{ delete {node} where slug = $s }}");
+    og.mutate("main", &q, json!({"s": slug})).unwrap();
+}
+
+#[test]
+fn apply_survives_permanent_deleted_on_main() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let c = permanent(&og, "C", 2);
+    let keep = propose_link(&og, &a, &b, 0.9);
+    let dead_adopted = propose_link(&og, &a, &c, 0.8);
+    let _dead_undecided = propose_link(&og, &b, &c, 0.7);
+    save_decisions(&state_path(&s), vec![(&keep, adopt()), (&dead_adopted, adopt())]);
+    delete_on_main(&og, "Permanent", &c);
+
+    let summary = apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(summary, Summary { links: 1, hubs: 0 });
+    assert_eq!(links(&og, "main"), [(a.clone(), b.clone(), None)]);
+    assert!(list_proposals(&og).unwrap().is_empty());
+    // 2 回目も通る
+    apply(&og, &state_path(&s), &queue).unwrap();
+}
+
+#[test]
+fn apply_survives_hub_deleted_on_main() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    og.load("main", &[json!({"type":"Hub","data":{"slug":"hub-x","title":"ハブ X"}})]).unwrap();
+    let _h = propose_hub(&og, "hub-x", &a);
+    delete_on_main(&og, "Hub", "hub-x");
+
+    apply(&og, &state_path(&s), &queue).unwrap();
+    assert!(includes(&og, "main").is_empty());
+    assert!(list_proposals(&og).unwrap().is_empty());
+}
+
+#[test]
+fn proposing_after_deletion_still_works() {
+    let s = TestServer::start();
+    let og = s.og();
+    let a = permanent(&og, "A", 0);
+    let b = permanent(&og, "B", 1);
+    let c = permanent(&og, "C", 2);
+    propose_link(&og, &a, &c, 0.8);
+    delete_on_main(&og, "Permanent", &c);
+    // worker の提案も ensure_review を通る
+    let p = propose_link(&og, &a, &b, 0.9);
+    assert_eq!(list_proposals(&og).unwrap(), [p]);
+}
+
+#[test]
+fn apply_survives_permanent_recreated_with_same_slug() {
+    let s = TestServer::start();
+    let og = s.og();
+    let queue = Queue::open(s.state_dir()).unwrap();
+    let a = permanent(&og, "A", 0);
+    let c = permanent(&og, "C", 2);
+    let p = propose_link(&og, &a, &c, 0.8);
+    save_decisions(&state_path(&s), vec![(&p, adopt())]);
+    delete_on_main(&og, "Permanent", &c);
+    og.load(
+        "main",
+        &[json!({"type":"Permanent","data":{"slug":c,"title":"C2","body":"作り直し","created":"2026-11-20T12:00:00Z"}})],
+    )
+    .unwrap();
+
+    // エッジは slug で結ばれるので、作り直したノードに付く (orphan_edge にならない)
+    let summary = apply(&og, &state_path(&s), &queue).unwrap();
+    assert_eq!(summary, Summary { links: 1, hubs: 0 });
+    assert_eq!(links(&og, "main"), [(a, c, None)]);
+}

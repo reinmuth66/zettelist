@@ -232,6 +232,8 @@ pub fn apply(og: &Omnigraph, state_path: &Path, queue: &Queue) -> Result<Summary
     //    review から消えていれば手順 4 で書き戻す
     let mut state = ReviewState::load(state_path)?;
     let proposals = list_proposals(og)?;
+    // 手順 3 は review にしか触れないので、手順 4 でもこのまま使える
+    let in_main = main_keys(og)?;
     {
         let ReviewState { decisions, reinsert } = &mut state;
         // 端の Permanent や Hub が main から消えた提案は、書き戻せないので判断ごと捨てる
@@ -243,6 +245,11 @@ pub fn apply(og: &Omnigraph, state_path: &Path, queue: &Queue) -> Result<Summary
         for key in &dead {
             decisions.remove(key);
         }
+        // review から提案ごと消えた (ensure_review が片付けた) ものの判断も捨てる。
+        // 判断は提案にしか付かないので、review にも reinsert にも main にもない鍵は、消えた提案のもの
+        decisions.retain(|key, _| {
+            in_main.contains(key) || proposals.iter().chain(reinsert.iter()).any(|p| p.key() == *key)
+        });
         reinsert.retain(|p| !matches!(decisions.get(&p.key()), Some(Decision::Reject)));
         for p in &proposals {
             let key = p.key();
@@ -269,7 +276,6 @@ pub fn apply(og: &Omnigraph, state_path: &Path, queue: &Queue) -> Result<Summary
     // 4. 採用したもののうち、理由つきのリンクは理由を付けて書き直す (`@key` なので 1 本のまま)。
     //    前回の手順 3 で review から消えたまま採用されたもの (reinsert にだけ残る) は、元の類似度で書き戻す。
     //    すでに merge 済み (main にある) ものは、理由まで main に入っているので書かない
-    let in_main = main_keys(og)?;
     let mut writes = Vec::new();
     for (key, d) in &state.decisions {
         let Decision::Adopt { reason } = d else { continue };
