@@ -108,6 +108,14 @@ impl Store for CtxStore {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotedCall {
+    pub from: Vec<(NoteKind, String)>,
+    pub title: String,
+    pub body: String,
+}
+
+#[cfg(test)]
 #[derive(Default)]
 pub struct FakeStore {
     pub inbox: Vec<InboxItem>,
@@ -121,6 +129,8 @@ pub struct FakeStore {
     pub failed: Vec<Entry>,
     pub calls: Vec<String>,
     pub written: Vec<NewNote>,
+    pub promoted: Vec<PromotedCall>,
+    pub deleted: Vec<Vec<(NoteKind, String)>>,
     pub write_result: Option<Result<Done<WriteOutcome>, Error>>,
     pub fail_with: Option<Error>,
 }
@@ -176,8 +186,13 @@ impl Store for FakeStore {
         })
     }
 
-    fn promote(&mut self, _from: &[(NoteKind, String)], _title: &str, _body: &str) -> Result<Done<String>, Error> {
+    fn promote(&mut self, from: &[(NoteKind, String)], title: &str, body: &str) -> Result<Done<String>, Error> {
         self.check_err("promote")?;
+        self.promoted.push(PromotedCall {
+            from: from.to_vec(),
+            title: title.to_string(),
+            body: body.to_string(),
+        });
         Ok(Done {
             value: "20261125000000".to_string(),
             queue_warning: None,
@@ -187,6 +202,7 @@ impl Store for FakeStore {
 
     fn delete(&mut self, notes: &[(NoteKind, String)]) -> Result<(), Error> {
         self.check_err("delete")?;
+        self.deleted.push(notes.to_vec());
         self.inbox.retain(|item| !notes.iter().any(|(k, s)| *k == item.kind && s == &item.slug));
         Ok(())
     }

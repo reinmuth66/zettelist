@@ -1064,6 +1064,16 @@ mod tests {
         app.finish_promote(Ok("本文\n# ---- この行から下は保存時に消える ----".to_string()));
         let st = store.borrow();
         assert!(st.calls.iter().any(|c| c == "promote"));
+        assert_eq!(st.promoted.len(), 1);
+        assert_eq!(
+            st.promoted[0].from,
+            vec![
+                (NoteKind::Fleeting, "20261117000001".to_string()),
+                (NoteKind::Fleeting, "20261118000001".to_string()),
+            ]
+        );
+        assert_eq!(st.promoted[0].title, "小さいノート");
+        assert_eq!(st.promoted[0].body, "本文");
         assert!(!app.is_selected(&app.inbox()[0]));
         assert!(app.message().is_some_and(|m| m.contains("昇格しました")));
     }
@@ -1112,6 +1122,8 @@ mod tests {
         app.on_key(key('y'));
         let st = store.borrow();
         assert!(st.calls.iter().any(|c| c == "delete"));
+        assert_eq!(st.deleted.len(), 1);
+        assert_eq!(st.deleted[0], vec![(NoteKind::Fleeting, "20261117000001".to_string())]);
         assert_eq!(st.inbox.len(), 2);
     }
 
