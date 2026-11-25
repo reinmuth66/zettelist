@@ -1,9 +1,12 @@
-use crate::notes::{InboxItem, Near, NoteKind};
+use crate::notes::{InboxItem, Near, NewNote, NoteKind, SourceSummary};
+use crate::ops::WriteOutcome;
+use crate::source_ref::kind_hint;
+use crate::tui::input::LineInput;
 use crate::tui::keys::{Action, Keymap, Resolved, Screen};
 use crate::tui::store::Store;
 use crate::tui::theme::Theme;
-use chrono::{DateTime, Utc};
-use ratatui::crossterm::event::{KeyEvent, KeyEventKind};
+use chrono::{DateTime, Local, Utc};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::collections::{HashMap, HashSet};
 
 pub struct Settings {
@@ -18,6 +21,59 @@ pub enum Effect {
     Quit,
     Edit { draft: String },
     Open(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteField {
+    Body,
+    Source,
+    Locator,
+}
+
+pub struct WriteForm {
+    pub body: LineInput,
+    pub source: LineInput,
+    pub locator: LineInput,
+    pub focus: WriteField,
+    sources: Vec<SourceSummary>,
+}
+
+impl WriteForm {
+    /// 出典の入力に前方一致する最初の登録済み slug の残りを返す。
+    pub fn source_suggestion(&self) -> Option<&str> {
+        let input = self.source.text();
+        if input.is_empty() {
+            return None;
+        }
+        self.sources
+            .iter()
+            .find_map(|s| s.slug.strip_prefix(input).filter(|rest| !rest.is_empty()))
+    }
+
+    /// 位置の欄に出す薄い入力例を返す。位置に入力があれば出さない。
+    pub fn locator_hint(&self) -> Option<&'static str> {
+        if !self.locator.text().is_empty() {
+            return None;
+        }
+        let src = self.source.text().trim();
+        if src.is_empty() {
+            return None;
+        }
+        let kind = self
+            .sources
+            .iter()
+            .find(|s| s.slug == src)
+            .map(|s| s.kind.as_str())
+            .or_else(|| kind_hint(src))?;
+        match kind {
+            "book" => Some("p.42 / ch.3"),
+            "paper" => Some("sec.3.2 / fig.4"),
+            "article" => Some("見出し"),
+            "video" => Some("12:30"),
+            "talk" => Some("slide 14"),
+            _ => None,
+        }
+    }
 }
 
 pub struct App {
@@ -35,6 +91,7 @@ pub struct App {
     review_count: usize,
     failed_count: usize,
     show_help: bool,
+    write_form: Option<WriteForm>,
 }
 
 impl App {
@@ -54,6 +111,7 @@ impl App {
             review_count: 0,
             failed_count: 0,
             show_help: false,
+            write_form: None,
         };
         app.reload_inbox();
         app
@@ -130,6 +188,11 @@ impl App {
             return None;
         }
         self.message = None;
+
+        if self.write_form.is_some() {
+            self.handle_write_key(key);
+            return None;
+        }
 
         let pending = self.pending_key.take();
         match self.settings.keys.resolve(self.screen, pending, key) {
@@ -212,6 +275,11 @@ impl App {
             }
             Action::ClearSelection => {
                 self.selected.clear();
+            }
+            Action::Write => {
+                if self.selected.is_empty() {
+                    self.open_write_form();
+                }
             }
             Action::ToReview => {
                 self.screen = Screen::Review;
@@ -300,7 +368,155 @@ impl App {
         self.show_help
     }
 
+    pub fn write_form(&self) -> Option<&WriteForm> {
+        self.write_form.as_ref()
+    }
+
+    fn open_write_form(&mut self) {
+        let sources = match self.store.sources() {
+            Ok(list) => list,
+            Err(e) => {
+                self.record_error(e.to_string());
+                Vec::new()
+            }
+        };
+        self.pending_key = None;
+        self.write_form = Some(WriteForm {
+            body: LineInput::new(""),
+            source: LineInput::new(""),
+            locator: LineInput::new(""),
+            focus: WriteField::Body,
+            sources,
+        });
+    }
+
+    fn handle_write_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.write_form = None;
+                return;
+            }
+            KeyCode::Enter => {
+                self.submit_write_form();
+                return;
+            }
+            KeyCode::BackTab => {
+                self.step_write_focus(false);
+                return;
+            }
+            KeyCode::Tab => {
+                let forward = !key.modifiers.contains(KeyModifiers::SHIFT);
+                self.step_write_focus(forward);
+                return;
+            }
+            _ => {}
+        }
+
+        let Some(form) = self.write_form.as_mut() else {
+            return;
+        };
+
+        if form.focus == WriteField::Source
+            && matches!(
+                (key.code, key.modifiers),
+                (KeyCode::Right, KeyModifiers::NONE) | (KeyCode::Char('e'), KeyModifiers::CONTROL)
+            )
+            && form.source.is_at_end()
+        {
+            if let Some(rest) = form.source_suggestion() {
+                let full = format!("{}{}", form.source.text(), rest);
+                form.source = LineInput::new(&full);
+                return;
+            }
+        }
+
+        let target = match form.focus {
+            WriteField::Body => &mut form.body,
+            WriteField::Source => &mut form.source,
+            WriteField::Locator => &mut form.locator,
+        };
+        target.handle(key);
+    }
+
+    fn step_write_focus(&mut self, forward: bool) {
+        let has_locator = self.settings.locator;
+        let Some(form) = self.write_form.as_mut() else {
+            return;
+        };
+        form.focus = match (form.focus, forward, has_locator) {
+            (WriteField::Body, true, _) => WriteField::Source,
+            (WriteField::Source, true, true) => WriteField::Locator,
+            (WriteField::Source, true, false) => WriteField::Body,
+            (WriteField::Locator, true, _) => WriteField::Body,
+            (WriteField::Body, false, true) => WriteField::Locator,
+            (WriteField::Body, false, false) => WriteField::Source,
+            (WriteField::Source, false, _) => WriteField::Body,
+            (WriteField::Locator, false, _) => WriteField::Source,
+        };
+    }
+
+    fn submit_write_form(&mut self) {
+        let Some(form) = self.write_form.as_ref() else {
+            return;
+        };
+        let body = form.body.text().to_string();
+        if body.trim().is_empty() {
+            return;
+        }
+        let source_str = form.source.text().trim();
+        let source = if source_str.is_empty() {
+            None
+        } else {
+            Some(source_str.to_string())
+        };
+        let locator_str = form.locator.text().trim();
+        let locator = if source.is_some() && !locator_str.is_empty() {
+            Some(locator_str.to_string())
+        } else {
+            None
+        };
+
+        let note = NewNote {
+            body,
+            source,
+            locator,
+            created: Local::now(),
+        };
+
+        match self.store.write(note) {
+            Ok(done) => {
+                self.write_form = None;
+                let mut msg = match done.value {
+                    WriteOutcome::Saved(slug) => format!("保存しました {slug}"),
+                    WriteOutcome::Queued(e) => {
+                        if e.is_transient() {
+                            "omnigraph-server に届かないので待ち行列に保存しました".to_string()
+                        } else {
+                            format!("書けなかったので待ち行列に保存しました: {e}")
+                        }
+                    }
+                };
+                for w in [done.queue_warning, done.worker_warning].into_iter().flatten() {
+                    msg.push_str(" / ");
+                    msg.push_str(&w);
+                }
+                self.message = Some(msg);
+                self.reload_inbox();
+            }
+            Err(e) => {
+                self.message = Some(e.to_string());
+            }
+        }
+    }
+
     pub fn usable_keys(&self) -> Vec<(String, &'static str)> {
+        if self.write_form.is_some() {
+            return vec![
+                ("Enter".to_string(), "保存"),
+                ("Tab".to_string(), "次の欄"),
+                ("Esc".to_string(), "中止"),
+            ];
+        }
         let pairs: &[(Action, &'static str)] = match self.screen {
             Screen::Inbox => &[
                 (Action::Toggle, "選ぶ"),
@@ -472,5 +688,150 @@ mod tests {
         assert_eq!(app.on_key(key('z')), None);
         assert_eq!(app.cursor(), 0);
         assert_eq!(app.message(), None);
+    }
+
+    fn type_text(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.on_key(key(c));
+        }
+    }
+
+    #[test]
+    fn write_saves_fleeting() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('i'));
+        type_text(&mut app, "箇条書きは考えを止める");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let st = store.borrow();
+        assert!(st.calls.iter().any(|c| c == "write"));
+        assert_eq!(st.written.len(), 1);
+        assert_eq!(st.written[0].body, "箇条書きは考えを止める");
+        assert_eq!(st.written[0].source, None);
+        assert_eq!(st.written[0].locator, None);
+        assert!(app.message().is_some_and(|m| m.contains("保存しました")));
+        assert!(app.write_form().is_none());
+    }
+
+    #[test]
+    fn write_with_source_saves_literature() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('i'));
+        type_text(&mut app, "メモ本文");
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        type_text(&mut app, "ahrens2017");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let st = store.borrow();
+        assert_eq!(st.written.len(), 1);
+        assert_eq!(st.written[0].source.as_deref(), Some("ahrens2017"));
+        assert_eq!(st.written[0].locator, None);
+    }
+
+    #[test]
+    fn write_empty_body_does_nothing() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('i'));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(store.borrow().written.is_empty());
+        assert!(app.write_form().is_some());
+    }
+
+    #[test]
+    fn write_esc_cancels() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let store = Rc::new(RefCell::new(three_store()));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('i'));
+        type_text(&mut app, "消える");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(store.borrow().written.is_empty());
+        assert!(app.write_form().is_none());
+    }
+
+    #[test]
+    fn source_completion_accepts_with_right_arrow() {
+        use crate::notes::SourceSummary;
+
+        let mut store = three_store();
+        store.sources = vec![SourceSummary {
+            slug: "ahrens2017".into(),
+            kind: "book".into(),
+        }];
+        let mut app = App::new(Box::new(store), settings());
+        app.on_key(key('i'));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        type_text(&mut app, "ahr");
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        assert_eq!(app.write_form().unwrap().source.text(), "ahrens2017");
+    }
+
+    #[test]
+    fn locator_field_only_when_enabled() {
+        let mut app = App::new(Box::new(three_store()), settings());
+        app.on_key(key('i'));
+        assert_eq!(app.write_form().unwrap().focus, WriteField::Body);
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.write_form().unwrap().focus, WriteField::Source);
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.write_form().unwrap().focus, WriteField::Body);
+
+        let mut s = settings();
+        s.locator = true;
+        let mut app2 = App::new(Box::new(three_store()), s);
+        app2.on_key(key('i'));
+        app2.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app2.write_form().unwrap().focus, WriteField::Source);
+        app2.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app2.write_form().unwrap().focus, WriteField::Locator);
+        app2.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app2.write_form().unwrap().focus, WriteField::Body);
+    }
+
+    #[test]
+    fn queued_write_reports_queue() {
+        use crate::ops::{Done, WriteOutcome};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut store = three_store();
+        store.write_result = Some(Ok(Done {
+            value: WriteOutcome::Queued(Error::Transient("timeout".into())),
+            queue_warning: None,
+            worker_warning: None,
+        }));
+        let store = Rc::new(RefCell::new(store));
+        let mut app = App::new(Box::new(Rc::clone(&store)), settings());
+        app.on_key(key('i'));
+        type_text(&mut app, "あとで送る");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.message().is_some_and(|m| m.contains("待ち行列に保存しました")));
+        assert!(app.write_form().is_none());
+    }
+
+    #[test]
+    fn i_with_selection_does_not_open_write_form() {
+        let mut app = App::new(Box::new(three_store()), settings());
+        app.on_key(key(' '));
+        app.on_key(key('i'));
+        assert!(app.write_form().is_none());
     }
 }

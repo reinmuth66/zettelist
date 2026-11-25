@@ -120,6 +120,8 @@ pub struct FakeStore {
     pub hubs: Vec<HubSummary>,
     pub failed: Vec<Entry>,
     pub calls: Vec<String>,
+    pub written: Vec<NewNote>,
+    pub write_result: Option<Result<Done<WriteOutcome>, Error>>,
     pub fail_with: Option<Error>,
 }
 
@@ -162,6 +164,10 @@ impl Store for FakeStore {
 
     fn write(&mut self, note: NewNote) -> Result<Done<WriteOutcome>, Error> {
         self.check_err("write")?;
+        self.written.push(note.clone());
+        if let Some(res) = self.write_result.take() {
+            return res;
+        }
         let slug = notes::note_slug(note.created.naive_local());
         Ok(Done {
             value: WriteOutcome::Saved(slug),
@@ -263,4 +269,26 @@ impl Store for FakeStore {
         self.failed.retain(|e| e.id != id);
         Ok(())
     }
+}
+
+#[cfg(test)]
+impl Store for std::rc::Rc<std::cell::RefCell<FakeStore>> {
+    fn inbox(&mut self) -> Result<Vec<InboxItem>, Error> { self.borrow_mut().inbox() }
+    fn inbox_embeddings(&mut self) -> Result<HashMap<(NoteKind, String), Vec<f32>>, Error> { self.borrow_mut().inbox_embeddings() }
+    fn similar_permanent(&mut self, kind: NoteKind, slug: &str) -> Result<Vec<Near>, Error> { self.borrow_mut().similar_permanent(kind, slug) }
+    fn sources(&mut self) -> Result<Vec<SourceSummary>, Error> { self.borrow_mut().sources() }
+    fn write(&mut self, note: NewNote) -> Result<Done<WriteOutcome>, Error> { self.borrow_mut().write(note) }
+    fn promote(&mut self, from: &[(NoteKind, String)], title: &str, body: &str) -> Result<Done<String>, Error> { self.borrow_mut().promote(from, title, body) }
+    fn delete(&mut self, notes: &[(NoteKind, String)]) -> Result<(), Error> { self.borrow_mut().delete(notes) }
+    fn proposals(&mut self) -> Result<(Vec<Proposal>, ReviewState), Error> { self.borrow_mut().proposals() }
+    fn note(&mut self, slug: &str) -> Result<Note, Error> { self.borrow_mut().note(slug) }
+    fn hubs(&mut self) -> Result<Vec<HubSummary>, Error> { self.borrow_mut().hubs() }
+    fn decide(&mut self, key: &str, decision: Option<Decision>) -> Result<(), Error> { self.borrow_mut().decide(key, decision) }
+    fn rehub(&mut self, key: &str, hub: &str) -> Result<Rehubbed, Error> { self.borrow_mut().rehub(key, hub) }
+    fn unrehub(&mut self, r: &Rehubbed) -> Result<(), Error> { self.borrow_mut().unrehub(r) }
+    fn merge(&mut self) -> Result<Done<Summary>, Error> { self.borrow_mut().merge() }
+    fn failed(&mut self) -> Result<Vec<Entry>, Error> { self.borrow_mut().failed() }
+    fn retry(&mut self, id: &str) -> Result<Done<()>, Error> { self.borrow_mut().retry(id) }
+    fn retry_all(&mut self) -> Result<Done<usize>, Error> { self.borrow_mut().retry_all() }
+    fn discard(&mut self, id: &str) -> Result<(), Error> { self.borrow_mut().discard(id) }
 }

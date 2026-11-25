@@ -1,5 +1,5 @@
 use crate::notes::NoteKind;
-use crate::tui::app::App;
+use crate::tui::app::{App, WriteField, WriteForm};
 use crate::tui::keys::Screen;
 use crate::tui::text::{short_date, truncate};
 use chrono::Utc;
@@ -16,21 +16,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         return;
     }
 
+    let has_write = app.write_form().is_some();
     let has_msg = app.message().is_some();
-    let constraints = if has_msg {
-        vec![
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ]
-    } else {
-        vec![
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ]
-    };
+    let mut constraints = vec![Constraint::Length(1), Constraint::Min(0)];
+    if has_write {
+        constraints.push(Constraint::Length(4));
+    }
+    if has_msg {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1));
 
     let chunks = Layout::vertical(constraints).split(area);
     let header_area = chunks[0];
@@ -44,17 +39,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Screen::Failed => draw_placeholder(frame, app, main_area, "失敗の一覧 (Esc または q で戻る)"),
     }
 
+    let mut idx = 2;
+    if has_write {
+        draw_write_form(frame, app, chunks[idx]);
+        idx += 1;
+    }
     if has_msg {
-        let msg_area = chunks[2];
-        let footer_area = chunks[3];
         if let Some(msg) = app.message() {
             let p = Paragraph::new(msg).style(Style::default().fg(app.settings().theme.error));
-            frame.render_widget(p, msg_area);
+            frame.render_widget(p, chunks[idx]);
         }
-        draw_footer(frame, app, footer_area);
-    } else {
-        draw_footer(frame, app, chunks[2]);
+        idx += 1;
     }
+    draw_footer(frame, app, chunks[idx]);
 
     if app.show_help() {
         draw_help(frame, app, area);
@@ -248,6 +245,120 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(p, area);
 }
 
+fn draw_write_form(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(form) = app.write_form() else {
+        return;
+    };
+    let theme = &app.settings().theme;
+    let block = Block::bordered();
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let label_style = |focused: bool| {
+        if focused {
+            Style::default().fg(theme.cursor).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.dim)
+        }
+    };
+
+    let label_w = 6u16;
+    let body_w = inner.width.saturating_sub(label_w);
+    let (body_text, body_col) = form.body.view(body_w);
+    let body_line = Line::from(vec![
+        Span::styled("新規  ", label_style(form.focus == WriteField::Body)),
+        Span::raw(body_text),
+    ]);
+    frame.render_widget(
+        Paragraph::new(body_line),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    if form.focus == WriteField::Body {
+        let cx = (inner.x + label_w + body_col).min(inner.x + inner.width.saturating_sub(1));
+        frame.set_cursor_position((cx, inner.y));
+    }
+
+    if inner.height < 2 {
+        return;
+    }
+
+    let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    if app.settings().locator {
+        let cols = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(row2);
+        let src_area = cols[0];
+        let loc_area = cols[1];
+
+        let src_w = src_area.width.saturating_sub(label_w + 1);
+        render_source_field(frame, form, src_area, src_w, label_style(form.focus == WriteField::Source), theme.dim);
+        if form.focus == WriteField::Source {
+            let (_, src_col) = form.source.view(src_w);
+            let cx = (src_area.x + label_w + src_col).min(src_area.x + src_area.width.saturating_sub(1));
+            frame.set_cursor_position((cx, src_area.y));
+        }
+
+        let loc_w = loc_area.width.saturating_sub(label_w);
+        let loc_spans = if form.locator.text().is_empty() {
+            let mut s = vec![Span::styled("位置  ", label_style(form.focus == WriteField::Locator))];
+            if let Some(hint) = form.locator_hint() {
+                s.push(Span::styled(
+                    truncate(hint, loc_w as usize),
+                    Style::default().fg(theme.dim),
+                ));
+            }
+            s
+        } else {
+            let (loc_text, _) = form.locator.view(loc_w);
+            vec![
+                Span::styled("位置  ", label_style(form.focus == WriteField::Locator)),
+                Span::raw(loc_text),
+            ]
+        };
+        frame.render_widget(Paragraph::new(Line::from(loc_spans)), loc_area);
+        if form.focus == WriteField::Locator {
+            let (_, loc_col) = form.locator.view(loc_w);
+            let cx = (loc_area.x + label_w + loc_col).min(loc_area.x + loc_area.width.saturating_sub(1));
+            frame.set_cursor_position((cx, loc_area.y));
+        }
+    } else {
+        let src_w = row2.width.saturating_sub(label_w);
+        render_source_field(frame, form, row2, src_w, label_style(form.focus == WriteField::Source), theme.dim);
+        if form.focus == WriteField::Source {
+            let (_, src_col) = form.source.view(src_w);
+            let cx = (row2.x + label_w + src_col).min(row2.x + row2.width.saturating_sub(1));
+            frame.set_cursor_position((cx, row2.y));
+        }
+    }
+}
+
+fn render_source_field(
+    frame: &mut Frame,
+    form: &WriteForm,
+    area: Rect,
+    field_w: u16,
+    label_style: Style,
+    dim_color: ratatui::style::Color,
+) {
+    let (src_text, _) = form.source.view(field_w);
+    let mut spans = vec![
+        Span::styled("出典  ", label_style),
+        Span::raw(src_text.clone()),
+    ];
+    if let Some(rest) = form.source_suggestion() {
+        let rem = (field_w as usize).saturating_sub(src_text.width());
+        if rem > 0 {
+            spans.push(Span::styled(
+                truncate(rest, rem),
+                Style::default().fg(dim_color),
+            ));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let w = area.width.min(50);
     let h = area.height.min(12);
@@ -386,5 +497,24 @@ mod tests {
         let app = App::new(Box::new(three_store()), settings());
         render(&app, 10, 3);
         render(&app, 1, 1);
+    }
+
+    #[test]
+    fn write_form_shows_fields_and_hint() {
+        let mut s = settings();
+        s.locator = true;
+        let mut app = App::new(Box::new(three_store()), s);
+        app.on_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        for c in "978-4-00-000000-0".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let screen = render(&app, 100, 20);
+        assert!(screen.contains("新規"), "{screen}");
+        assert!(screen.contains("出典"), "{screen}");
+        assert!(screen.contains("位置"), "{screen}");
+        assert!(screen.contains("p.42"), "{screen}");
+        let footer = screen.lines().last().unwrap_or("");
+        assert!(footer.contains("Enter") && footer.contains("Tab") && footer.contains("Esc"), "{footer}");
     }
 }

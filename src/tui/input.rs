@@ -21,6 +21,11 @@ impl LineInput {
         &self.text
     }
 
+    /// カーソルが末尾にあるか返す。
+    pub fn is_at_end(&self) -> bool {
+        self.cursor == self.text.chars().count()
+    }
+
     /// キー入力を処理する。処理したら true、それ以外は false。
     pub fn handle(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
