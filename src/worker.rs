@@ -26,7 +26,7 @@ pub fn execute(ctx: &Ctx, job: &Job) -> Result<(), Error> {
             ctx.queue
                 .push(Job::Embed { kind: written.kind, slug: written.slug })
                 .map(|_| ())
-                .map_err(|e| Error::Transient(format!("埋め込みの登録に失敗しました: {e}")))
+                .map_err(|e| Error::Transient(format!("failed to queue the embedding: {e}")))
         }
         Job::Embed { kind, slug } => embed_note(ctx, *kind, slug).map(|_| ()),
         Job::Promote { slug } => {
@@ -108,7 +108,7 @@ fn run_queue_inner(
 
 /// `worker.lock` を取る。ほかの worker が持っていれば `None`。ロックはファイルを閉じると外れる。
 fn try_lock(path: &Path) -> Result<Option<File>, Error> {
-    let io = |e: std::io::Error| Error::Permanent(format!("worker.lock を開けません ({}): {e}", path.display()));
+    let io = |e: std::io::Error| Error::Permanent(format!("cannot open worker.lock ({}): {e}", path.display()));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io)?;
     }
@@ -134,7 +134,7 @@ fn run_worker_with(ctx: &Ctx, once: bool) -> Result<(), Error> {
     let mut exec = |job: &Job| {
         let result = execute(ctx, job);
         if let Err(e) = &result {
-            eprintln!("Job に失敗しました ({job:?}): {e}");
+            eprintln!("job failed ({job:?}): {e}");
         }
         result
     };
@@ -153,14 +153,14 @@ pub fn spawn_worker(paths: &Paths) -> Result<(), Error> {
     if std::env::var_os("ZETTELIST_NO_SPAWN").is_some() {
         return Ok(());
     }
-    let fail = |what: &str, e: std::io::Error| Error::Transient(format!("{what}に失敗しました: {e}"));
-    let exe = std::env::current_exe().map_err(|e| fail("実行ファイルの特定", e))?;
+    let fail = |what: &str, e: std::io::Error| Error::Transient(format!("failed to {what}: {e}"));
+    let exe = std::env::current_exe().map_err(|e| fail("find the executable", e))?;
     let log_path = paths.worker_log();
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| fail("ログのディレクトリの作成", e))?;
+        fs::create_dir_all(parent).map_err(|e| fail("create the log directory", e))?;
     }
-    let log = OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| fail("worker.log を開くこと", e))?;
-    let log2 = log.try_clone().map_err(|e| fail("worker.log の複製", e))?;
+    let log = OpenOptions::new().create(true).append(true).open(&log_path).map_err(|e| fail("open worker.log", e))?;
+    let log2 = log.try_clone().map_err(|e| fail("clone worker.log", e))?;
     // 呼び出し元の端末の Ctrl-C や終了に巻き込まれないよう、別のプロセスグループにする
     Command::new(exe)
         .arg("--worker")
@@ -169,7 +169,7 @@ pub fn spawn_worker(paths: &Paths) -> Result<(), Error> {
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log2))
         .spawn()
-        .map_err(|e| fail("worker の起動", e))?;
+        .map_err(|e| fail("start the worker", e))?;
     Ok(())
 }
 

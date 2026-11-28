@@ -231,5 +231,5 @@ fn missing_embedding_is_transient() {
 
     let e = propose_for(&og, &no_embedder(), &cfg(5, 0.0), &slug).unwrap_err();
     assert!(matches!(e, Error::Transient(_)), "{e:?}");
-    assert_eq!(e.to_string(), "埋め込みがまだありません");
+    assert_eq!(e.to_string(), "the embedding does not exist yet");
 }

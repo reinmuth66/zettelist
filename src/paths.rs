@@ -17,7 +17,7 @@ impl Paths {
         let home = || {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
-                .ok_or_else(|| Error::Permanent("ホームディレクトリが分かりません (HOME が未設定)".to_string()))
+                .ok_or_else(|| Error::Permanent("cannot find the home directory (HOME is not set)".to_string()))
         };
         let config = match std::env::var_os("ZETTELIST_CONFIG") {
             Some(p) => PathBuf::from(p),
@@ -63,7 +63,7 @@ impl Paths {
 /// ロックはファイルを閉じる (返した `File` を落とす) と外れる。
 pub fn lock_file(path: &std::path::Path) -> Result<std::fs::File, Error> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let io = |e: std::io::Error| Error::Permanent(format!("{name} を取れません ({}): {e}", path.display()));
+    let io = |e: std::io::Error| Error::Permanent(format!("cannot acquire {name} ({}): {e}", path.display()));
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(io)?;
     file.lock().map_err(io)?;
     Ok(file)

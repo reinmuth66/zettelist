@@ -35,7 +35,7 @@ pub struct Similar {
 
 /// worker の起動に失敗しても、保存は済んでいるので警告だけにする
 pub fn start_worker(ctx: &Ctx) -> Option<String> {
-    spawn_worker(&ctx.paths).err().map(|e| format!("worker を起動できません: {e}"))
+    spawn_worker(&ctx.paths).err().map(|e| format!("cannot start the worker: {e}"))
 }
 
 /// メモを書き込む。書けなければ待ち行列に保存する。
@@ -47,7 +47,7 @@ pub fn write(ctx: &Ctx, note: NewNote) -> Result<Done<WriteOutcome>, Error> {
                 .queue
                 .push(Job::Embed { kind: written.kind, slug: written.slug.clone() })
                 .err()
-                .map(|e| format!("埋め込みの登録に失敗しました: {e}"));
+                .map(|e| format!("failed to queue the embedding: {e}"));
             let worker_warning = start_worker(ctx);
             Ok(Done { value: WriteOutcome::Saved(written.slug), queue_warning, worker_warning })
         }
@@ -75,7 +75,7 @@ pub fn promote(
         .queue
         .push(Job::Promote { slug: slug.clone() })
         .err()
-        .map(|e| format!("昇格しましたが、リンク提案を待ち行列に積めませんでした: {e}"));
+        .map(|e| format!("promoted, but could not queue link proposals: {e}"));
     let worker_warning = start_worker(ctx);
     Ok(Done { value: slug, queue_warning, worker_warning })
 }

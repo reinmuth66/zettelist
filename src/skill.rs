@@ -12,13 +12,13 @@ pub fn export(dir: &Path, force: bool) -> Result<(), Error> {
     let file = dir.join("SKILL.md");
     if file.exists() && !force {
         return Err(Error::Invalid(format!(
-            "{} にはすでに skill があります。上書きするなら --force",
+            "{} already has a skill; use --force to overwrite it",
             dir.display()
         )));
     }
     std::fs::create_dir_all(dir)
-        .map_err(|e| Error::Permanent(format!("{} を作れません: {e}", dir.display())))?;
+        .map_err(|e| Error::Permanent(format!("cannot create {}: {e}", dir.display())))?;
     std::fs::write(&file, SKILL)
-        .map_err(|e| Error::Permanent(format!("{} に書けません: {e}", file.display())))?;
+        .map_err(|e| Error::Permanent(format!("cannot write {}: {e}", file.display())))?;
     Ok(())
 }

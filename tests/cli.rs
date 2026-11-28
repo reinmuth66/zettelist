@@ -37,7 +37,7 @@ fn blank_body_exits_nonzero() {
     let output = zl(dir.path()).arg("  ").output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("本文が空です"), "stderr: {stderr}");
+    assert!(stderr.contains("the body is empty"), "stderr: {stderr}");
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn stopped_server_queues_the_note() {
     let output = zl(dir.path()).arg("メモ").output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("待ち行列に保存しました"), "stdout: {stdout}");
+    assert!(stdout.contains("queued the note"), "stdout: {stdout}");
     let items = pending(dir.path());
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["job"]["WriteNote"]["body"], "メモ");
@@ -68,7 +68,7 @@ fn no_body_without_terminal_is_an_error() {
     let output = zl(dir.path()).output().unwrap();
     assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("TUI は端末で起動します"), "stderr: {stderr}");
+    assert!(stderr.contains("the TUI needs a terminal"), "stderr: {stderr}");
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn server_rejection_still_queues_the_note() {
     let output = cmd.arg("メモ").output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("書き込めなかったので待ち行列に保存しました: "), "stdout: {stdout}");
+    assert!(stdout.contains("Could not write; queued the note: "), "stdout: {stdout}");
     assert_eq!(pending(dir.path()).len(), 1);
 }
 
@@ -151,7 +151,7 @@ fn reembed_queues_one_embed_per_note() {
     let output = cmd.arg("--reembed").output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("1 件の埋め込みを積みました"), "stdout: {stdout}");
+    assert!(stdout.contains("Queued 1 embeddings"), "stdout: {stdout}");
     let items = pending(dir.path());
     assert_eq!(items.len(), 1);
     assert!(items[0]["job"]["Embed"].is_object(), "{}", items[0]);
@@ -163,7 +163,7 @@ fn backup_without_repo_exits_nonzero() {
     let output = zl(dir.path()).arg("--backup").output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("backup.repo が設定されていません"), "stderr: {stderr}");
+    assert!(stderr.contains("backup.repo is not set"), "stderr: {stderr}");
 }
 
 #[test]

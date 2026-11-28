@@ -47,7 +47,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if has_msg {
         constraints.push(Constraint::Length(1));
     }
-    constraints.push(Constraint::Length(1));
 
     let chunks = Layout::vertical(constraints).split(area);
     let header_area = chunks[0];
@@ -71,7 +70,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         idx += 1;
     }
     if let Some(count) = app.confirm_delete_count() {
-        let p = Paragraph::new(format!("{count} 件消します。よろしいですか [y/N]"))
+        let p = Paragraph::new(format!("Delete {count} note(s)? [y/N]"))
             .style(Style::default().fg(app.settings().theme.error));
         frame.render_widget(p, chunks[idx]);
         idx += 1;
@@ -82,14 +81,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if let Some((adopted, rejected)) = app.confirm_merge_counts() {
         let p = Paragraph::new(format!(
-            "採用 {adopted} 件、却下 {rejected} 件を main に入れます。よろしいですか [y/N]"
+            "Merge {adopted} adopted, drop {rejected} rejected into main? [y/N]"
         ))
         .style(Style::default().fg(app.settings().theme.error));
         frame.render_widget(p, chunks[idx]);
         idx += 1;
     }
     if has_confirm_discard {
-        let p = Paragraph::new("この失敗を捨てます。よろしいですか [y/N]")
+        let p = Paragraph::new("Discard this failed job? [y/N]")
             .style(Style::default().fg(app.settings().theme.error));
         frame.render_widget(p, chunks[idx]);
         idx += 1;
@@ -103,9 +102,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             let p = Paragraph::new(msg).style(style);
             frame.render_widget(p, chunks[idx]);
         }
-        idx += 1;
     }
-    draw_footer(frame, app, chunks[idx]);
 
     if app.hub_picker().is_some() {
         draw_hub_picker(frame, app, area);
@@ -122,13 +119,13 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     if app.screen() == Screen::Review {
         let (links, hubs) = app.review_counts();
         let left = format!(
-            "review {} 件  (links {} / hub {})",
+            "review {}  (links {} / hubs {})",
             app.proposals().len(),
             links,
             hubs
         );
         let text = if let Some(Proposal::Link { similarity, .. }) = app.current_proposal() {
-            let right = format!("(近さ {:.2})", similarity);
+            let right = format!("(similarity {:.2})", similarity);
             let total_w = area.width as usize;
             let lw = left.width();
             let rw = right.width();
@@ -146,7 +143,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     }
     let now = Utc::now();
     let text = format!(
-        "inbox {} 件 (30日超 {})     review {} 件     失敗 {} 件",
+        "inbox {} (30+ days {})     review {}     failed {}",
         app.inbox().len(),
         app.old_count(now),
         app.review_count(),
@@ -170,7 +167,7 @@ fn draw_inbox_list(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::bordered();
 
     if app.inbox().is_empty() {
-        let empty = Paragraph::new("整理されていないメモはありません")
+        let empty = Paragraph::new("Inbox is empty")
             .style(Style::default().fg(theme.dim))
             .block(block);
         frame.render_widget(empty, area);
@@ -275,12 +272,12 @@ fn draw_inbox_detail(frame: &mut Frame, app: &App, area: Rect) {
             .source_slug
             .as_deref()
             .or(item.source_id.as_deref())
-            .unwrap_or("(不明)");
+            .unwrap_or("(unknown)");
         let loc = item.locator.as_deref().unwrap_or("");
         let source_line = if loc.is_empty() {
-            format!("出典 {src}")
+            format!("source {src}")
         } else {
-            format!("出典 {src}  {loc}")
+            format!("source {src}  {loc}")
         };
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(source_line, Style::default().fg(theme.dim))));
@@ -289,11 +286,11 @@ fn draw_inbox_detail(frame: &mut Frame, app: &App, area: Rect) {
     let similar = app.current_similar_permanent();
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "似ている Permanent",
+        "Similar permanent notes",
         Style::default().fg(theme.header).add_modifier(Modifier::BOLD),
     )));
     if similar.is_empty() {
-        lines.push(Line::from(Span::styled("なし", Style::default().fg(theme.dim))));
+        lines.push(Line::from(Span::styled("none", Style::default().fg(theme.dim))));
     } else {
         for near in similar {
             let title = near.title.as_deref().unwrap_or(&near.slug);
@@ -324,7 +321,7 @@ fn draw_inbox_detail(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
     let Some(prop) = app.current_proposal() else {
-        draw_placeholder(frame, app, area, "提案はありません");
+        draw_placeholder(frame, app, area, "No proposals");
         return;
     };
 
@@ -338,9 +335,9 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
     if let (Some(d_area), Some(dec)) = (decision_area, app.current_decision()) {
         let theme = &app.settings().theme;
         let (label, color) = match dec {
-            Decision::Adopt { reason: None } => ("● 採用".to_string(), theme.adopted),
-            Decision::Adopt { reason: Some(r) } => (format!("● 採用 (理由: {r})"), theme.adopted),
-            Decision::Reject => ("× 却下".to_string(), theme.rejected),
+            Decision::Adopt { reason: None } => ("● adopted".to_string(), theme.adopted),
+            Decision::Adopt { reason: Some(r) } => (format!("● adopted (reason: {r})"), theme.adopted),
+            Decision::Reject => ("× rejected".to_string(), theme.rejected),
         };
         frame.render_widget(
             Paragraph::new(label).style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
@@ -351,21 +348,21 @@ fn draw_review(frame: &mut Frame, app: &App, area: Rect) {
     match prop {
         Proposal::Link { from, to, .. } => {
             if body_area.width < 80 {
-                render_review_note(frame, app, from, " 新しいノート ", body_area);
+                render_review_note(frame, app, from, " New note ", body_area);
             } else {
                 let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(body_area);
-                render_review_note(frame, app, from, " 新しいノート ", cols[0]);
-                render_review_note(frame, app, to, " 候補 ", cols[1]);
+                render_review_note(frame, app, from, " New note ", cols[0]);
+                render_review_note(frame, app, to, " Candidate ", cols[1]);
             }
         }
         Proposal::Hub { hub, note } => {
             if body_area.width < 80 {
-                render_review_note(frame, app, note, " 新しいノート ", body_area);
+                render_review_note(frame, app, note, " New note ", body_area);
             } else {
                 let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(body_area);
-                render_review_note(frame, app, note, " 新しいノート ", cols[0]);
+                render_review_note(frame, app, note, " New note ", cols[0]);
                 render_review_hub(frame, app, hub, cols[1]);
             }
         }
@@ -426,7 +423,7 @@ fn draw_review_reason(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let theme = &app.settings().theme;
-    let label = "理由: ";
+    let label = "reason: ";
     let label_w = label.width() as u16;
     let field_w = area.width.saturating_sub(label_w);
     let (text, col) = input.view(field_w);
@@ -456,9 +453,9 @@ fn draw_hub_picker(frame: &mut Frame, app: &App, area: Rect) {
     let popup = Rect::new(x, y, w, h);
 
     frame.render_widget(Clear, popup);
-    let block = Block::bordered().title(" Hub を選ぶ ");
+    let block = Block::bordered().title(" Choose a hub ");
     if picker.hubs.is_empty() {
-        let p = Paragraph::new("他の Hub はありません")
+        let p = Paragraph::new("No other hubs")
             .style(Style::default().fg(theme.dim))
             .block(block);
         frame.render_widget(p, popup);
@@ -497,17 +494,6 @@ fn draw_placeholder(frame: &mut Frame, app: &App, area: Rect, label: &str) {
     frame.render_widget(p, area);
 }
 
-fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let text = app
-        .usable_keys()
-        .into_iter()
-        .map(|(k, desc)| format!("[{k}]{desc}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let p = Paragraph::new(text).style(Style::default().fg(app.settings().theme.dim));
-    frame.render_widget(p, area);
-}
-
 fn draw_write_form(frame: &mut Frame, app: &App, area: Rect) {
     let Some(form) = app.write_form() else {
         return;
@@ -529,11 +515,11 @@ fn draw_write_form(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let label_w = 6u16;
+    let label_w = 8u16;
     let body_w = inner.width.saturating_sub(label_w);
     let (body_text, body_col) = form.body.view(body_w);
     let body_line = Line::from(vec![
-        Span::styled("新規  ", label_style(form.focus == WriteField::Body)),
+        Span::styled("note    ", label_style(form.focus == WriteField::Body)),
         Span::raw(body_text),
     ]);
     frame.render_widget(
@@ -565,7 +551,7 @@ fn draw_write_form(frame: &mut Frame, app: &App, area: Rect) {
 
         let loc_w = loc_area.width.saturating_sub(label_w);
         let loc_spans = if form.locator.text().is_empty() {
-            let mut s = vec![Span::styled("位置  ", label_style(form.focus == WriteField::Locator))];
+            let mut s = vec![Span::styled("locator ", label_style(form.focus == WriteField::Locator))];
             if let Some(hint) = form.locator_hint() {
                 s.push(Span::styled(
                     truncate(hint, loc_w as usize),
@@ -576,7 +562,7 @@ fn draw_write_form(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             let (loc_text, _) = form.locator.view(loc_w);
             vec![
-                Span::styled("位置  ", label_style(form.focus == WriteField::Locator)),
+                Span::styled("locator ", label_style(form.focus == WriteField::Locator)),
                 Span::raw(loc_text),
             ]
         };
@@ -607,7 +593,7 @@ fn render_source_field(
 ) {
     let (src_text, _) = form.source.view(field_w);
     let mut spans = vec![
-        Span::styled("出典  ", label_style),
+        Span::styled("source  ", label_style),
         Span::raw(src_text.clone()),
     ];
     if let Some(rest) = form.source_suggestion() {
@@ -635,7 +621,7 @@ fn draw_promote_title(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let label = "題    ";
+    let label = "title ";
     let label_w = label.width() as u16;
     let field_w = inner.width.saturating_sub(label_w);
     let (text, col) = input.view(field_w);
@@ -669,7 +655,7 @@ fn draw_failed_list(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::bordered();
 
     if app.failed().is_empty() {
-        let empty = Paragraph::new("失敗したジョブはありません")
+        let empty = Paragraph::new("No failed jobs")
             .style(Style::default().fg(theme.dim))
             .block(block);
         frame.render_widget(empty, area);
@@ -685,7 +671,7 @@ fn draw_failed_list(frame: &mut Frame, app: &App, area: Rect) {
             let is_cur = idx == app.failed_cursor();
             let cursor_str = if is_cur { "> " } else { "  " };
             let name = entry.job.name();
-            let attempts_str = format!("{}回", entry.attempts);
+            let attempts_str = format!("{}x", entry.attempts);
             let first_err = entry
                 .last_error
                 .as_deref()
@@ -747,23 +733,23 @@ fn draw_failed_detail(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        "エラー",
+        "Error",
         Style::default().fg(theme.header).add_modifier(Modifier::BOLD),
     )));
-    let err_text = entry.last_error.as_deref().unwrap_or("(なし)");
+    let err_text = entry.last_error.as_deref().unwrap_or("(none)");
     for l in err_text.lines() {
         lines.push(Line::from(l.to_string()));
     }
     if err_text.is_empty() {
-        lines.push(Line::from("(なし)"));
+        lines.push(Line::from("(none)"));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "ジョブ",
+        "Job",
         Style::default().fg(theme.header).add_modifier(Modifier::BOLD),
     )));
-    lines.push(Line::from(format!("{} ({} 回)", entry.job.name(), entry.attempts)));
+    lines.push(Line::from(format!("{} ({} attempts)", entry.job.name(), entry.attempts)));
     lines.push(Line::from(job_summary(&entry.job)));
 
     let detail = Paragraph::new(lines)
@@ -785,7 +771,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     let max_line_w = lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16;
-    let title = "キー操作 (どのキーでも閉じる)";
+    let title = "Keys (press any key to close)";
     let w = max_line_w
         .max(title.width() as u16)
         .saturating_add(4)
@@ -883,9 +869,9 @@ mod tests {
         let mut app = App::new(Box::new(three_store()), settings());
         app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         let screen = render(&app, 100, 20);
-        assert!(screen.contains("inbox 3 件"), "{screen}");
-        assert!(screen.contains("review 0 件"), "{screen}");
-        assert!(screen.contains("失敗 0 件"), "{screen}");
+        assert!(screen.contains("inbox 3"), "{screen}");
+        assert!(screen.contains("review 0"), "{screen}");
+        assert!(screen.contains("failed 0"), "{screen}");
         assert!(screen.contains("30+"), "{screen}");
         assert!(screen.contains("[x]"), "{screen}");
         assert!(screen.contains('>'), "{screen}");
@@ -901,21 +887,26 @@ mod tests {
     }
 
     #[test]
-    fn footer_lists_only_usable_keys() {
-        let app = App::new(Box::new(three_store()), settings());
-        let screen = render(&app, 100, 20);
-        let footer = screen.lines().last().unwrap_or("");
-        assert!(footer.contains("space"), "footer: {footer}");
-        assert!(footer.contains("r"), "footer: {footer}");
-        assert!(!footer.contains("[m]"), "footer: {footer}");
-        assert!(!footer.contains("[a]"), "footer: {footer}");
+    fn screens_show_no_key_hints() {
+        let mut app = App::new(Box::new(review_store()), settings());
+        let inbox = render(&app, 100, 20);
+        assert!(!inbox.contains("[?]") && !inbox.contains("[space]"), "{inbox}");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        let write = render(&app, 100, 20);
+        assert!(!write.contains("[Enter]") && !write.contains("[Tab]"), "{write}");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        let review = render(&app, 100, 20);
+        assert!(!review.contains("[A]") && !review.contains("[?]"), "{review}");
     }
 
     #[test]
     fn empty_inbox_says_so() {
         let app = App::new(Box::new(FakeStore::default()), settings());
         let screen = render(&app, 100, 20);
-        assert!(screen.contains("整理されていないメモはありません"), "{screen}");
+        assert!(screen.contains("Inbox is empty"), "{screen}");
     }
 
     #[test]
@@ -936,12 +927,10 @@ mod tests {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         let screen = render(&app, 100, 20);
-        assert!(screen.contains("新規"), "{screen}");
-        assert!(screen.contains("出典"), "{screen}");
-        assert!(screen.contains("位置"), "{screen}");
+        assert!(screen.contains("note"), "{screen}");
+        assert!(screen.contains("source"), "{screen}");
+        assert!(screen.contains("locator"), "{screen}");
         assert!(screen.contains("p.42"), "{screen}");
-        let footer = screen.lines().last().unwrap_or("");
-        assert!(footer.contains("Enter") && footer.contains("Tab") && footer.contains("Esc"), "{footer}");
     }
 
     #[test]
@@ -950,12 +939,12 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
         let screen = render(&app, 100, 20);
-        assert!(screen.contains("題"), "{screen}");
+        assert!(screen.contains("title"), "{screen}");
 
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         let screen2 = render(&app, 100, 20);
-        assert!(screen2.contains("1 件消します。よろしいですか [y/N]"), "{screen2}");
+        assert!(screen2.contains("Delete 1 note(s)? [y/N]"), "{screen2}");
     }
 
     fn review_store() -> FakeStore {
@@ -1008,23 +997,7 @@ mod tests {
         let screen = render(&app, 100, 20);
         assert!(screen.contains("ノートA"), "{screen}");
         assert!(screen.contains("ノートB"), "{screen}");
-        assert!(screen.contains("近さ 0.82"), "{screen}");
-    }
-
-    #[test]
-    fn footer_hides_keys_not_for_this_proposal() {
-        let mut app = App::new(Box::new(review_store()), settings());
-        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-        let link_screen = render(&app, 100, 20);
-        let link_footer = link_screen.lines().last().unwrap_or("");
-        assert!(link_footer.contains("[A]"), "link_footer: {link_footer}");
-        assert!(!link_footer.contains("[c]"), "link_footer: {link_footer}");
-
-        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
-        let hub_screen = render(&app, 100, 20);
-        let hub_footer = hub_screen.lines().last().unwrap_or("");
-        assert!(!hub_footer.contains("[A]"), "hub_footer: {hub_footer}");
-        assert!(hub_footer.contains("[c]"), "hub_footer: {hub_footer}");
+        assert!(screen.contains("similarity 0.82"), "{screen}");
     }
 
     #[test]
@@ -1032,7 +1005,7 @@ mod tests {
         let mut app = App::new(Box::new(FakeStore::default()), settings());
         app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         let screen = render(&app, 100, 20);
-        assert!(screen.contains("提案はありません"), "{screen}");
+        assert!(screen.contains("No proposals"), "{screen}");
     }
 
     #[test]
@@ -1066,32 +1039,8 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         let screen = render(&app, 100, 20);
-        assert!(screen.contains("理由を書いて採用"), "{screen}");
+        assert!(screen.contains("Adopt with a reason"), "{screen}");
         assert!(screen.contains("A"), "{screen}");
-    }
-
-    #[test]
-    fn inbox_footer_hides_unusable_keys() {
-        let empty = App::new(Box::new(FakeStore::default()), settings());
-        let empty_screen = render(&empty, 100, 20);
-        let empty_footer = empty_screen.lines().last().unwrap_or("");
-        assert!(!empty_footer.contains("[space]"), "empty_footer: {empty_footer}");
-        assert!(!empty_footer.contains("[Esc]"), "empty_footer: {empty_footer}");
-        assert!(!empty_footer.contains("[d]"), "empty_footer: {empty_footer}");
-        assert!(!empty_footer.contains("[o]"), "empty_footer: {empty_footer}");
-
-        let mut app = App::new(Box::new(three_store()), settings());
-        let unselected_screen = render(&app, 100, 20);
-        let unselected_footer = unselected_screen.lines().last().unwrap_or("");
-        assert!(unselected_footer.contains("[space]"), "unselected_footer: {unselected_footer}");
-        assert!(!unselected_footer.contains("[Esc]"), "unselected_footer: {unselected_footer}");
-        assert!(unselected_footer.contains("[d]"), "unselected_footer: {unselected_footer}");
-        assert!(!unselected_footer.contains("[o]"), "unselected_footer: {unselected_footer}");
-
-        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        let selected_screen = render(&app, 100, 20);
-        let selected_footer = selected_screen.lines().last().unwrap_or("");
-        assert!(selected_footer.contains("[Esc]"), "selected_footer: {selected_footer}");
     }
 
     #[test]
@@ -1105,13 +1054,13 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
-        // メッセージ行は最下行 (y=19) の 1 つ上 (y=18)
-        assert_eq!(buf[(0, 18)].fg, ratatui::style::Color::Reset);
+        // メッセージ行は最下行 (y=19)
+        assert_eq!(buf[(0, 19)].fg, ratatui::style::Color::Reset);
 
-        app.set_message("失敗しました");
+        app.set_message("failed");
         terminal.draw(|f| draw(f, &app)).unwrap();
         let buf2 = terminal.backend().buffer();
-        assert_eq!(buf2[(0, 18)].fg, settings().theme.error);
+        assert_eq!(buf2[(0, 19)].fg, settings().theme.error);
     }
 
     #[test]

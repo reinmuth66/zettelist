@@ -60,12 +60,12 @@ pub fn backoff(attempts: u32) -> Option<Duration> {
 }
 
 fn io_err(what: &str, path: &Path, e: std::io::Error) -> Error {
-    Error::Permanent(format!("{what}に失敗しました ({}): {e}", path.display()))
+    Error::Permanent(format!("failed to {what} ({}): {e}", path.display()))
 }
 
 /// 指定された id が failed に無い。指定の誤りなので入力の誤りとして返す。
 fn missing_failed(id: &str) -> Error {
-    Error::Invalid(format!("失敗の中に {id} はありません"))
+    Error::Invalid(format!("no failed job {id}"))
 }
 
 /// 時計が止まっても戻っても、前に使った値より必ず大きくする
@@ -89,10 +89,10 @@ fn entry_path(dir: &Path, id: &str) -> PathBuf {
 fn write_entry(dir: &Path, entry: &Entry) -> Result<(), Error> {
     let path = entry_path(dir, &entry.id);
     let json = serde_json::to_vec_pretty(entry)
-        .map_err(|e| Error::Permanent(format!("待ち行列の項目を JSON にできません: {e}")))?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| io_err("一時ファイルの作成", dir, e))?;
-    tmp.write_all(&json).map_err(|e| io_err("一時ファイルへの書き込み", tmp.path(), e))?;
-    tmp.as_file().sync_all().map_err(|e| io_err("一時ファイルの同期", tmp.path(), e))?;
+        .map_err(|e| Error::Permanent(format!("cannot serialize the queue entry to JSON: {e}")))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| io_err("create a temporary file", dir, e))?;
+    tmp.write_all(&json).map_err(|e| io_err("write the temporary file", tmp.path(), e))?;
+    tmp.as_file().sync_all().map_err(|e| io_err("sync the temporary file", tmp.path(), e))?;
     tmp.persist(&path).map_err(|e| io_err("rename", &path, e.error))?;
     Ok(())
 }
@@ -103,7 +103,7 @@ fn read_entry(path: &Path, corrupt: &Path) -> Result<Option<Entry>, Error> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(io_err("読み込み", path, e)),
+        Err(e) => return Err(io_err("read", path, e)),
     };
     match serde_json::from_slice(&bytes) {
         Ok(entry) => Ok(Some(entry)),
@@ -113,7 +113,7 @@ fn read_entry(path: &Path, corrupt: &Path) -> Result<Option<Entry>, Error> {
                 Ok(()) => Ok(None),
                 // 移す前に別のプロセスが片付けた
                 Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(io_err("壊れたファイルの退避", path, e)),
+                Err(e) => Err(io_err("move aside the corrupt file", path, e)),
             }
         }
     }
@@ -124,7 +124,7 @@ fn remove_file(path: &Path) -> Result<(), Error> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(io_err("削除", path, e)),
+        Err(e) => Err(io_err("delete", path, e)),
     }
 }
 
@@ -132,8 +132,8 @@ fn remove_file(path: &Path) -> Result<(), Error> {
 /// 消えたファイルは飛ばし、壊れたファイルは `corrupt` へ移す。
 fn list(dir: &Path, corrupt: &Path) -> Result<Vec<Entry>, Error> {
     let mut paths = Vec::new();
-    for item in fs::read_dir(dir).map_err(|e| io_err("ディレクトリの読み込み", dir, e))? {
-        let path = item.map_err(|e| io_err("ディレクトリの読み込み", dir, e))?.path();
+    for item in fs::read_dir(dir).map_err(|e| io_err("read the directory", dir, e))? {
+        let path = item.map_err(|e| io_err("read the directory", dir, e))?.path();
         if path.extension().is_some_and(|x| x == "json") {
             paths.push(path);
         }
@@ -154,7 +154,7 @@ impl Queue {
         let failed = state_dir.join("queue/failed");
         let corrupt = state_dir.join("queue/corrupt");
         for dir in [&pending, &failed, &corrupt] {
-            fs::create_dir_all(dir).map_err(|e| io_err("ディレクトリの作成", dir, e))?;
+            fs::create_dir_all(dir).map_err(|e| io_err("create the directory", dir, e))?;
         }
         Ok(Queue { pending, failed, corrupt })
     }
@@ -233,7 +233,7 @@ impl Queue {
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == ErrorKind::NotFound => Err(missing_failed(id)),
-            Err(e) => Err(io_err("削除", &path, e)),
+            Err(e) => Err(io_err("delete", &path, e)),
         }
     }
 
@@ -392,8 +392,8 @@ mod tests {
     fn retry_and_discard_of_missing_id_are_errors() {
         let dir = tempdir().unwrap();
         let q = Queue::open(dir.path()).unwrap();
-        assert!(matches!(q.retry_failed("nothing"), Err(Error::Invalid(m)) if m.contains("ありません")));
-        assert!(matches!(q.discard_failed("nothing"), Err(Error::Invalid(m)) if m.contains("ありません")));
+        assert!(matches!(q.retry_failed("nothing"), Err(Error::Invalid(m)) if m.contains("no failed job")));
+        assert!(matches!(q.discard_failed("nothing"), Err(Error::Invalid(m)) if m.contains("no failed job")));
     }
 
     #[test]

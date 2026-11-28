@@ -1,8 +1,8 @@
 use crate::notes::{InboxItem, NoteKind};
 use crate::tui::text::short_date;
 
-const PLACEHOLDER: &str = "(ここに Permanent を書く)";
-const MARKER: &str = "# ---- この行から下は保存時に消える ----";
+const PLACEHOLDER: &str = "(write the permanent note here)";
+const MARKER: &str = "# ---- everything below this line is removed on save ----";
 
 /// 選んだ inbox ノートから、昇格用の `$EDITOR` 下書きを組み立てる。
 pub fn build(items: &[InboxItem]) -> String {
@@ -95,14 +95,14 @@ mod tests {
         ];
         let text = build(&items);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "(ここに Permanent を書く)");
+        assert_eq!(lines[0], "(write the permanent note here)");
         assert!(lines.contains(&"# [1118 F] a b"), "{text}");
         assert!(lines.contains(&"# [1117 L ahrens2017 p.42] 箇条書きは考えを止める"), "{text}");
     }
 
     #[test]
     fn parse_drops_comment_section() {
-        let text = "本文\n\n# ---- この行から下は保存時に消える ----\n# x";
+        let text = "本文\n\n# ---- everything below this line is removed on save ----\n# x";
         assert_eq!(parse(text).as_deref(), Some("本文"));
     }
 
@@ -124,7 +124,7 @@ mod tests {
         let items = vec![fleeting("20261118090000", "メモ")];
         let text = build_with_body(&items, Some("残した本文"));
         assert!(text.starts_with("残した本文\n"), "{text}");
-        assert!(!text.contains("(ここに Permanent を書く)"), "{text}");
+        assert!(!text.contains("(write the permanent note here)"), "{text}");
         assert!(text.contains("# [1118 F] メモ"), "{text}");
         assert_eq!(parse(&text).as_deref(), Some("残した本文"));
     }

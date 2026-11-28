@@ -217,7 +217,7 @@ impl Store for FakeStore {
         self.notes
             .get(slug)
             .cloned()
-            .ok_or_else(|| Error::Permanent(format!("ノートが見つかりません: {slug}")))
+            .ok_or_else(|| Error::Permanent(format!("note not found: {slug}")))
     }
 
     fn hubs(&mut self) -> Result<Vec<HubSummary>, Error> {

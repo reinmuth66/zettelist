@@ -88,7 +88,7 @@ impl WriteForm {
         match kind {
             "book" => Some("p.42 / ch.3"),
             "paper" => Some("sec.3.2 / fig.4"),
-            "article" => Some("見出し"),
+            "article" => Some("heading"),
             "video" => Some("12:30"),
             "talk" => Some("slide 14"),
             _ => None,
@@ -983,7 +983,7 @@ impl App {
             match self.store.merge() {
                 Ok(done) => {
                     let s = done.value;
-                    let mut msg = format!("マージしました (リンク {} 本、ハブ {} 件)", s.links, s.hubs);
+                    let mut msg = format!("Merged ({} links, {} hubs)", s.links, s.hubs);
                     let has_warning = done.queue_warning.is_some() || done.worker_warning.is_some();
                     for w in [done.queue_warning, done.worker_warning].into_iter().flatten() {
                         msg.push_str(" / ");
@@ -1058,21 +1058,21 @@ impl App {
             Ok(t) => t,
             Err(reason) => {
                 if reason.trim().is_empty() {
-                    self.set_info("昇格を取り消しました");
+                    self.set_info("Promotion cancelled");
                 } else {
-                    self.set_error(format!("昇格を取り消しました: {reason}"));
+                    self.set_error(format!("Promotion cancelled: {reason}"));
                 }
                 return;
             }
         };
         let Some(parsed) = draft::parse(&text) else {
-            self.set_info("昇格を取り消しました");
+            self.set_info("Promotion cancelled");
             return;
         };
         match self.store.promote(&from, &title, &parsed) {
             Ok(done) => {
                 self.saved_promote_body = None;
-                let mut msg = format!("昇格しました {}", done.value);
+                let mut msg = format!("Promoted {}", done.value);
                 let has_warning = done.queue_warning.is_some() || done.worker_warning.is_some();
                 for w in [done.queue_warning, done.worker_warning].into_iter().flatten() {
                     msg.push_str(" / ");
@@ -1088,7 +1088,7 @@ impl App {
             }
             Err(e) => {
                 self.saved_promote_body = Some(parsed);
-                self.set_error(format!("{e} (書いた本文は次の昇格の下書きに残します)"));
+                self.set_error(format!("{e} (your text is kept for the next promotion draft)"));
             }
         }
     }
@@ -1358,12 +1358,12 @@ impl App {
             Ok(done) => {
                 self.write_form = None;
                 let (mut msg, mut is_err) = match done.value {
-                    WriteOutcome::Saved(slug) => (format!("保存しました {slug}"), false),
+                    WriteOutcome::Saved(slug) => (format!("Saved {slug}"), false),
                     WriteOutcome::Queued(e) => {
                         let m = if e.is_transient() {
-                            "omnigraph-server に届かないので待ち行列に保存しました".to_string()
+                            "omnigraph-server is unreachable; queued the note".to_string()
                         } else {
-                            format!("書けなかったので待ち行列に保存しました: {e}")
+                            format!("Could not write; queued the note: {e}")
                         };
                         (m, true)
                     }
@@ -1386,140 +1386,6 @@ impl App {
         }
     }
 
-    pub fn usable_keys(&self) -> Vec<(String, &'static str)> {
-        if self.write_form.is_some() {
-            return vec![
-                ("Enter".to_string(), "保存"),
-                ("Tab".to_string(), "次の欄"),
-                ("Esc".to_string(), "中止"),
-            ];
-        }
-        if self.promote_title().is_some() {
-            return vec![
-                ("Enter".to_string(), "決定"),
-                ("Esc".to_string(), "中止"),
-            ];
-        }
-        if self.confirm_delete.is_some() {
-            return vec![
-                ("y".to_string(), "削除"),
-                ("他".to_string(), "中止"),
-            ];
-        }
-        if self.review_reason.is_some() {
-            return vec![
-                ("Enter".to_string(), "決定"),
-                ("Esc".to_string(), "中止"),
-            ];
-        }
-        if self.hub_picker.is_some() {
-            return vec![
-                ("j/k".to_string(), "選ぶ"),
-                ("Enter".to_string(), "決定"),
-                ("Esc".to_string(), "中止"),
-            ];
-        }
-        if self.confirm_merge {
-            return vec![
-                ("y".to_string(), "マージ"),
-                ("他".to_string(), "中止"),
-            ];
-        }
-        if self.confirm_discard.is_some() {
-            return vec![
-                ("y".to_string(), "捨てる"),
-                ("他".to_string(), "中止"),
-            ];
-        }
-        if self.screen == Screen::Review {
-            let mut pairs: Vec<(Action, &'static str)> = Vec::new();
-            if let Some(prop) = self.current_proposal() {
-                pairs.push((Action::Adopt, "採用"));
-                if matches!(prop, Proposal::Link { .. }) {
-                    pairs.push((Action::AdoptWithReason, "理由付き採用"));
-                }
-                pairs.push((Action::Reject, "却下"));
-                if matches!(prop, Proposal::Hub { .. }) {
-                    pairs.push((Action::Change, "Hub変更"));
-                }
-                pairs.extend([
-                    (Action::Next, "次へ"),
-                    (Action::Prev, "前へ"),
-                    (Action::Undo, "取消"),
-                    (Action::Redo, "やり直し"),
-                    (Action::Merge, "マージ"),
-                ]);
-            }
-            pairs.extend([
-                (Action::Back, "戻る"),
-                (Action::Help, "ヘルプ"),
-            ]);
-            return pairs
-                .into_iter()
-                .filter_map(|(act, desc)| {
-                    self.settings
-                        .keys
-                        .label(self.screen, act)
-                        .map(|k| (k, desc))
-                })
-                .collect();
-        }
-        if self.screen == Screen::Inbox {
-            let mut pairs: Vec<(Action, &'static str)> = vec![(
-                Action::Write,
-                if self.selected.is_empty() { "書く" } else { "昇格" },
-            )];
-            if !self.inbox.is_empty() {
-                pairs.push((Action::Toggle, "選ぶ"));
-            }
-            if !self.selected.is_empty() {
-                pairs.push((Action::ClearSelection, "選択解除"));
-            }
-            if !self.inbox.is_empty() {
-                pairs.push((Action::Delete, "削除"));
-            }
-            if self
-                .current_item()
-                .is_some_and(|i| i.kind == NoteKind::Literature && i.source_id.as_deref().and_then(source_url).is_some())
-            {
-                pairs.push((Action::OpenSource, "出典を開く"));
-            }
-            pairs.extend([
-                (Action::ToReview, "レビュー"),
-                (Action::ToFailed, "失敗"),
-                (Action::Help, "ヘルプ"),
-                (Action::Quit, "終了"),
-            ]);
-            return pairs
-                .into_iter()
-                .filter_map(|(act, desc)| {
-                    self.settings
-                        .keys
-                        .label(self.screen, act)
-                        .map(|k| (k, desc))
-                })
-                .collect();
-        }
-        let mut pairs: Vec<(Action, &'static str)> = Vec::new();
-        if !self.failed.is_empty() {
-            pairs.extend([
-                (Action::Retry, "やり直し"),
-                (Action::Discard, "捨てる"),
-                (Action::RetryAll, "全部やり直し"),
-            ]);
-        }
-        pairs.extend([(Action::Back, "戻る"), (Action::Help, "ヘルプ")]);
-        pairs
-            .into_iter()
-            .filter_map(|(act, desc)| {
-                self.settings
-                    .keys
-                    .label(self.screen, act)
-                    .map(|k| (k, desc))
-            })
-            .collect()
-    }
-
     pub fn help_keys(&self) -> Vec<(String, &'static str)> {
         let mut out: Vec<(String, &'static str)> = Vec::new();
         let label = |act: Action| self.settings.keys.label(self.screen, act);
@@ -1530,13 +1396,13 @@ impl App {
                     (
                         Action::Write,
                         if self.selected.is_empty() {
-                            "新しいメモを書く"
+                            "Write a new note"
                         } else {
-                            "選んだものから Permanent を書く"
+                            "Promote the selection to a permanent note"
                         },
                     ),
-                    (Action::Toggle, "選ぶ / 外す"),
-                    (Action::ClearSelection, "選択を全部外す"),
+                    (Action::Toggle, "Select / unselect"),
+                    (Action::ClearSelection, "Clear the selection"),
                 ];
                 for (act, desc) in pairs {
                     if let Some(k) = label(act) {
@@ -1545,12 +1411,12 @@ impl App {
                 }
                 if !self.inbox.is_empty() {
                     if let Some(k) = label(Action::Delete) {
-                        out.push((k, "削除 (確認あり)"));
+                        out.push((k, "Delete (asks first)"));
                     }
                 }
                 for (act, desc) in [
-                    (Action::ToReview, "レビューへ"),
-                    (Action::ToFailed, "失敗の一覧へ"),
+                    (Action::ToReview, "Go to review"),
+                    (Action::ToFailed, "Go to failed jobs"),
                 ] {
                     if let Some(k) = label(act) {
                         out.push((k, desc));
@@ -1561,48 +1427,48 @@ impl App {
                         && i.source_id.as_deref().and_then(source_url).is_some()
                 }) {
                     if let Some(k) = label(Action::OpenSource) {
-                        out.push((k, "出典の元のページを開く"));
+                        out.push((k, "Open the source page"));
                     }
                 }
             }
             Screen::Review => {
                 if let Some(prop) = self.current_proposal() {
                     if let Some(k) = label(Action::Adopt) {
-                        out.push((k, "採用して次へ"));
+                        out.push((k, "Adopt and go to the next"));
                     }
                     if matches!(prop, Proposal::Link { .. }) {
                         if let Some(k) = label(Action::AdoptWithReason) {
-                            out.push((k, "理由を書いて採用"));
+                            out.push((k, "Adopt with a reason"));
                         }
                     }
                     if let Some(k) = label(Action::Reject) {
-                        out.push((k, "却下して次へ"));
+                        out.push((k, "Reject and go to the next"));
                     }
                     if matches!(prop, Proposal::Hub { .. }) {
                         if let Some(k) = label(Action::Change) {
-                            out.push((k, "別の Hub を選び直す"));
+                            out.push((k, "Choose another hub"));
                         }
                     }
                     if let (Some(n), Some(p)) = (label(Action::Next), label(Action::Prev)) {
-                        out.push((format!("{n} / {p}"), "判断せずに次 / 前へ"));
+                        out.push((format!("{n} / {p}"), "Next / previous without deciding"));
                     }
                     if let (Some(u), Some(r)) = (label(Action::Undo), label(Action::Redo)) {
-                        out.push((format!("{u} / {r}"), "直前の判断を取り消す / やり直す"));
+                        out.push((format!("{u} / {r}"), "Undo / redo the last decision"));
                     }
                     if let Some(k) = label(Action::Merge) {
-                        out.push((k, "採用したものを main に入れる (確認あり)"));
+                        out.push((k, "Merge adopted proposals into main (asks first)"));
                     }
                 }
                 if let Some(k) = label(Action::Back) {
-                    out.push((k, "inbox へ"));
+                    out.push((k, "Back to inbox"));
                 }
             }
             Screen::Failed => {
                 if !self.failed.is_empty() {
                     for (act, desc) in [
-                        (Action::Retry, "やり直す"),
-                        (Action::Discard, "捨てる (確認あり)"),
-                        (Action::RetryAll, "全部やり直す"),
+                        (Action::Retry, "Retry"),
+                        (Action::Discard, "Discard (asks first)"),
+                        (Action::RetryAll, "Retry all"),
                     ] {
                         if let Some(k) = label(act) {
                             out.push((k, desc));
@@ -1610,37 +1476,37 @@ impl App {
                     }
                 }
                 if let Some(k) = label(Action::Back) {
-                    out.push((k, "inbox へ"));
+                    out.push((k, "Back to inbox"));
                 }
             }
         }
 
         if let (Some(d), Some(u)) = (label(Action::Down), label(Action::Up)) {
-            out.push((format!("{d} / {u}"), "下 / 上へ移動"));
+            out.push((format!("{d} / {u}"), "Move down / up"));
         }
         if let (Some(t), Some(b)) = (label(Action::Top), label(Action::Bottom)) {
-            out.push((format!("{t} / {b}"), "先頭 / 末尾へ"));
+            out.push((format!("{t} / {b}"), "Go to top / bottom"));
         }
         if let (Some(sd), Some(su)) = (label(Action::ScrollDown), label(Action::ScrollUp)) {
-            out.push((format!("{sd} / {su}"), "右の欄を下 / 上に送る"));
+            out.push((format!("{sd} / {su}"), "Scroll the right pane down / up"));
         }
         if let Some(k) = label(Action::Help) {
-            out.push((k, "キーの一覧"));
+            out.push((k, "Show this list"));
         }
         if let Some(k) = label(Action::Quit) {
             let desc = if self.screen == Screen::Inbox {
-                "終了"
+                "Quit"
             } else {
-                "inbox に戻る"
+                "Back to inbox"
             };
             out.push((k, desc));
         }
 
         out.extend([
-            ("Enter / Esc".to_string(), "保存 / やめる"),
-            ("Tab / Shift-Tab".to_string(), "次 / 前の欄へ"),
-            ("← → Ctrl-a Ctrl-e".to_string(), "カーソル移動、行頭、行末"),
-            ("Ctrl-w / Ctrl-u".to_string(), "1 語消す / 行頭まで消す"),
+            ("Enter / Esc".to_string(), "Save / cancel (in a field)"),
+            ("Tab / Shift-Tab".to_string(), "Next / previous field"),
+            ("← → Ctrl-a Ctrl-e".to_string(), "Move cursor, line start, line end"),
+            ("Ctrl-w / Ctrl-u".to_string(), "Delete word / delete to line start"),
         ]);
 
         out
@@ -1817,7 +1683,7 @@ mod tests {
         assert_eq!(st.written[0].body, "箇条書きは考えを止める");
         assert_eq!(st.written[0].source, None);
         assert_eq!(st.written[0].locator, None);
-        assert!(app.message().is_some_and(|m| m.contains("保存しました")));
+        assert!(app.message().is_some_and(|m| m.contains("Saved")));
         assert!(app.write_form().is_none());
     }
 
@@ -1927,7 +1793,7 @@ mod tests {
         type_text(&mut app, "あとで送る");
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert!(app.message().is_some_and(|m| m.contains("待ち行列に保存しました")));
+        assert!(app.message().is_some_and(|m| m.contains("queued the note")));
         assert!(app.write_form().is_none());
     }
 
@@ -1954,7 +1820,7 @@ mod tests {
         let eff = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(eff, Some(Effect::Edit { .. })));
 
-        app.finish_promote(Ok("本文\n# ---- この行から下は保存時に消える ----".to_string()));
+        app.finish_promote(Ok("本文\n# ---- everything below this line is removed on save ----".to_string()));
         let st = store.borrow();
         assert!(st.calls.iter().any(|c| c == "promote"));
         assert_eq!(st.promoted.len(), 1);
@@ -1968,7 +1834,7 @@ mod tests {
         assert_eq!(st.promoted[0].title, "小さいノート");
         assert_eq!(st.promoted[0].body, "本文");
         assert!(!app.is_selected(&app.inbox()[0]));
-        assert!(app.message().is_some_and(|m| m.contains("昇格しました")));
+        assert!(app.message().is_some_and(|m| m.contains("Promoted")));
     }
 
     #[test]
@@ -2287,7 +2153,7 @@ mod tests {
 
         app.on_key(key('y'));
         assert!(store.borrow().calls.iter().any(|c| c == "merge"));
-        assert!(app.message().is_some_and(|m| m.contains("マージしました")));
+        assert!(app.message().is_some_and(|m| m.contains("Merged")));
     }
 
     #[test]
@@ -2472,7 +2338,7 @@ mod tests {
         assert_eq!(app.message_kind(), Some(MessageKind::Error));
         assert!(
             app.message()
-                .is_some_and(|m| m.contains("書いた本文は次の昇格の下書きに残します")),
+                .is_some_and(|m| m.contains("kept for the next promotion draft")),
             "msg={:?}",
             app.message()
         );
@@ -2485,7 +2351,7 @@ mod tests {
             panic!("expected Edit");
         };
         assert!(draft.starts_with("残すべき本文\n"), "draft={draft}");
-        assert!(!draft.contains("(ここに Permanent を書く)"), "draft={draft}");
+        assert!(!draft.contains("(write the permanent note here)"), "draft={draft}");
 
         // 成功したら捨てられる
         store.borrow_mut().fail_with = None;
@@ -2499,7 +2365,7 @@ mod tests {
         let Effect::Edit { draft: draft2 } = eff2.unwrap() else {
             panic!("expected Edit");
         };
-        assert!(draft2.starts_with("(ここに Permanent を書く)\n"), "draft2={draft2}");
+        assert!(draft2.starts_with("(write the permanent note here)\n"), "draft2={draft2}");
     }
 
     #[test]
@@ -2525,7 +2391,7 @@ mod tests {
         app.on_key(key('a'));
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.message_kind(), Some(MessageKind::Info));
-        assert!(app.message().is_some_and(|m| m.contains("保存しました")));
+        assert!(app.message().is_some_and(|m| m.contains("Saved")));
 
         app.set_message("失敗");
         assert_eq!(app.message_kind(), Some(MessageKind::Error));

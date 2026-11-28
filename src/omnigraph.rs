@@ -20,7 +20,7 @@ pub struct Omnigraph {
 impl Omnigraph {
     /// `state_dir/operator.yaml` に target `zl` を書く。
     pub fn new(cfg: &OmnigraphConfig, state_dir: &Path) -> Result<Omnigraph, Error> {
-        std::fs::create_dir_all(state_dir).map_err(|e| Error::Permanent(format!("{} を作れません: {e}", state_dir.display())))?;
+        std::fs::create_dir_all(state_dir).map_err(|e| Error::Permanent(format!("cannot create {}: {e}", state_dir.display())))?;
         let operator_config = state_dir.join("operator.yaml");
         // JSON の文字列は YAML としても正しい引用になる。
         let yaml = format!(
@@ -29,7 +29,7 @@ impl Omnigraph {
             Value::String(cfg.graph.clone()),
         );
         // worker と CLI が同時に書いても途中の内容が見えないよう、置き換えで書く。
-        let io = |e: std::io::Error| Error::Permanent(format!("{} を書けません: {e}", operator_config.display()));
+        let io = |e: std::io::Error| Error::Permanent(format!("cannot write {}: {e}", operator_config.display()));
         let mut tmp = tempfile::NamedTempFile::new_in(state_dir).map_err(io)?;
         tmp.write_all(yaml.as_bytes()).map_err(io)?;
         tmp.persist(&operator_config).map_err(|e| io(e.error))?;
@@ -59,7 +59,7 @@ impl Omnigraph {
         if let Some(home) = &self.home {
             cmd.env("OMNIGRAPH_HOME", home);
         }
-        let out = cmd.output().map_err(|e| Error::Transient(format!("omnigraph を起動できません: {e}")))?;
+        let out = cmd.output().map_err(|e| Error::Transient(format!("cannot start omnigraph: {e}")))?;
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
@@ -68,7 +68,7 @@ impl Omnigraph {
     }
 
     fn temp_file(&self, contents: &str) -> Result<tempfile::NamedTempFile, Error> {
-        let io = |e: std::io::Error| Error::Permanent(format!("一時ファイルを書けません: {e}"));
+        let io = |e: std::io::Error| Error::Permanent(format!("cannot write a temporary file: {e}"));
         let mut f = tempfile::NamedTempFile::new_in(&self.state_dir).map_err(io)?;
         f.write_all(contents.as_bytes()).map_err(io)?;
         f.flush().map_err(io)?;
@@ -135,16 +135,16 @@ fn params_json(params: &Value) -> String {
 
 fn rows_of(stdout: &str) -> Result<Vec<Map<String, Value>>, Error> {
     let v: Value = serde_json::from_str(stdout)
-        .map_err(|e| Error::Permanent(format!("omnigraph の出力を読めません: {e}: {}", truncate(stdout))))?;
+        .map_err(|e| Error::Permanent(format!("cannot read the omnigraph output: {e}: {}", truncate(stdout))))?;
     let rows = v
         .get("rows")
         .and_then(Value::as_array)
-        .ok_or_else(|| Error::Permanent(format!("omnigraph の出力に rows がありません: {}", truncate(stdout))))?;
+        .ok_or_else(|| Error::Permanent(format!("the omnigraph output has no rows: {}", truncate(stdout))))?;
     rows.iter()
         .map(|r| {
             r.as_object()
                 .cloned()
-                .ok_or_else(|| Error::Permanent(format!("rows の要素がオブジェクトではありません: {r}")))
+                .ok_or_else(|| Error::Permanent(format!("a rows element is not an object: {r}")))
         })
         .collect()
 }
@@ -178,7 +178,7 @@ fn classify_parts(status: &str, stdout: &str, stderr: &str) -> Error {
     }
     // `--json` のない呼び出し (export) は、標準エラーの文で見分ける。
     let text = stderr.trim().to_string();
-    let message = if text.is_empty() { format!("omnigraph が失敗しました ({status})") } else { text };
+    let message = if text.is_empty() { format!("omnigraph failed ({status})") } else { text };
     let transient = message.contains("this data request was not sent")
         || message.contains("connection failed")
         || (500..600).any(|s| message.contains(&format!("HTTP {s}")));

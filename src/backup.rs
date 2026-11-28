@@ -29,14 +29,14 @@ pub fn commit_export(
     push: bool,
 ) -> Result<Outcome, Error> {
     if !repo.is_dir() {
-        return Err(Error::Permanent(format!("backup.repo のディレクトリがありません: {}", repo.display())));
+        return Err(Error::Permanent(format!("backup.repo directory does not exist: {}", repo.display())));
     }
     // 通常のリポジトリは `.git` ディレクトリ、worktree やサブモジュールは `.git` ファイル
     if !repo.join(".git").exists() {
-        return Err(Error::Permanent(format!("backup.repo が git リポジトリではありません: {}", repo.display())));
+        return Err(Error::Permanent(format!("backup.repo is not a git repository: {}", repo.display())));
     }
     fs::write(repo.join(file_name), contents)
-        .map_err(|e| Error::Permanent(format!("{file_name} を書けません ({}): {e}", repo.display())))?;
+        .map_err(|e| Error::Permanent(format!("cannot write {file_name} ({}): {e}", repo.display())))?;
 
     git_ok(repo, &["add", "--", file_name])?;
     // 0 なら、書き出したファイルに commit するほどの差がない
@@ -53,7 +53,7 @@ pub fn commit_export(
     if push {
         let out = git(repo, &["push"])?;
         if !out.status.success() {
-            return Err(Error::Transient(format!("git push に失敗しました: {}", describe(&out))));
+            return Err(Error::Transient(format!("git push failed: {}", describe(&out))));
         }
     }
     Ok(outcome)
@@ -75,7 +75,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<Output, Error> {
         .arg(repo)
         .args(args)
         .output()
-        .map_err(|e| Error::Permanent(format!("git を起動できません: {e}")))
+        .map_err(|e| Error::Permanent(format!("cannot start git: {e}")))
 }
 
 /// 成功を求める git。失敗したら標準エラーを添えて Permanent にする。
@@ -84,7 +84,7 @@ fn git_ok(repo: &Path, args: &[&str]) -> Result<Output, Error> {
     if out.status.success() {
         Ok(out)
     } else {
-        Err(Error::Permanent(format!("git {} に失敗しました: {}", args[0], describe(&out))))
+        Err(Error::Permanent(format!("git {} failed: {}", args[0], describe(&out))))
     }
 }
 
@@ -212,7 +212,7 @@ mod tests {
     fn non_git_directory_is_permanent() {
         let dir = tempdir().unwrap();
         let err = commit_export(dir.path(), "g.jsonl", "x\n", "m", false).unwrap_err();
-        assert!(matches!(&err, Error::Permanent(m) if m.contains("git リポジトリではありません")), "{err:?}");
+        assert!(matches!(&err, Error::Permanent(m) if m.contains("is not a git repository")), "{err:?}");
         assert!(!dir.path().join("g.jsonl").exists());
     }
 }

@@ -16,127 +16,127 @@ use clap::{ArgGroup, Parser};
 use serde_json::json;
 use std::process::ExitCode;
 
-/// Zettelkasten on Omnigraph の書き込みと整理の道具
+/// Write and organize a Zettelkasten on Omnigraph
 #[derive(Parser)]
 #[command(name = "zettelist", version)]
 #[command(group = ArgGroup::new("action").args(["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "adopt", "reject", "undecide", "merge", "failed", "retry", "retry_all", "discard", "skill_export"]).multiple(false))]
 #[command(group = ArgGroup::new("promote_body").args(["promote_body_text", "promote_body_file"]).multiple(false))]
 struct Cli {
-    /// 出典 (ISBN、DOI、arXiv ID、URL、または登録済みのスラッグ)
-    #[arg(short = 's', long = "source", value_name = "出典", conflicts_with = "action")]
+    /// Source (ISBN, DOI, arXiv ID, URL, or a registered slug)
+    #[arg(short = 's', long = "source", value_name = "SOURCE", conflicts_with = "action")]
     source: Option<String>,
 
-    /// 出典の中の位置 (ページなど)
-    #[arg(short = 'p', long = "locator", value_name = "位置", requires = "source")]
+    /// Location within the source (page, etc.)
+    #[arg(short = 'p', long = "locator", value_name = "LOCATOR", requires = "source")]
     locator: Option<String>,
 
-    /// 本文。`-` で始まるときは `--` のあとに置く
-    #[arg(value_name = "本文", conflicts_with = "action")]
+    /// Note body. Put it after `--` when it starts with `-`
+    #[arg(value_name = "BODY", conflicts_with = "action")]
     body: Option<String>,
 
-    /// 成功を標準出力に JSON 1 つで、失敗を標準エラーに JSON で出す
+    /// Print success as one JSON value on stdout and failure as JSON on stderr
     #[arg(long, global = true)]
     json: bool,
 
-    /// 待ち行列を処理する worker として動く (通常は zl が自分で起動する)
+    /// Run as the worker that processes the queue (zl normally starts it itself)
     #[arg(long)]
     worker: bool,
 
-    /// worker が ready のものを 1 巡だけ処理して、待ちのあるものを待たずに終わる (テスト用)
+    /// Process ready jobs once and exit without waiting for delayed ones (for tests)
     #[arg(long, hide = true, requires = "worker")]
     once: bool,
 
-    /// すべてのノートの埋め込みを作り直す
+    /// Rebuild the embeddings of all notes
     #[arg(long)]
     reembed: bool,
 
-    /// main を backup.repo に書き出して commit する
+    /// Export main to backup.repo and commit it
     #[arg(long)]
     backup: bool,
 
-    /// 整理されていないメモの一覧
+    /// List unprocessed notes
     #[arg(long)]
     inbox: bool,
 
-    /// ノート 1 件の全文
-    #[arg(long, value_name = "スラッグ")]
+    /// Show the full text of one note
+    #[arg(long, value_name = "SLUG")]
     show: Option<String>,
 
-    /// そのノートに近い inbox と Permanent
-    #[arg(long, value_name = "スラッグ")]
+    /// Inbox and permanent notes similar to the note
+    #[arg(long, value_name = "SLUG")]
     similar: Option<String>,
 
-    /// 提案の一覧
+    /// List proposals
     #[arg(long)]
     review: bool,
 
-    /// 昇格元のノートから Permanent を作る (スラッグをカンマで区切る)。`--title` と、`--body` か `--body-file` が要る
-    #[arg(long, value_name = "スラッグ,...", requires = "title", requires = "promote_body")]
+    /// Create a permanent note from source notes (comma-separated slugs). Needs `--title` and `--body` or `--body-file`
+    #[arg(long, value_name = "SLUG,...", requires = "title", requires = "promote_body")]
     promote: Option<String>,
 
-    /// 昇格する Permanent の題名
-    #[arg(long, value_name = "題", requires = "promote")]
+    /// Title of the permanent note to promote
+    #[arg(long, value_name = "TITLE", requires = "promote")]
     title: Option<String>,
 
-    /// 昇格する Permanent の本文
-    #[arg(long = "body", value_name = "本文", requires = "promote")]
+    /// Body of the permanent note to promote
+    #[arg(long = "body", value_name = "BODY", requires = "promote")]
     promote_body_text: Option<String>,
 
-    /// 昇格する Permanent の本文を読むファイル
-    #[arg(long = "body-file", value_name = "パス", requires = "promote")]
+    /// File to read the body of the permanent note from
+    #[arg(long = "body-file", value_name = "PATH", requires = "promote")]
     promote_body_file: Option<String>,
 
-    /// ノートを消す (スラッグをカンマで区切る)。`--yes` が要る
-    #[arg(long, value_name = "スラッグ,...")]
+    /// Delete notes (comma-separated slugs). Needs `--yes`
+    #[arg(long, value_name = "SLUG,...")]
     delete: Option<String>,
 
-    /// 提案を採用する (キーは `--review` に出る)
-    #[arg(long, value_name = "キー")]
+    /// Adopt a proposal (keys are shown by `--review`)
+    #[arg(long, value_name = "KEY")]
     adopt: Option<String>,
 
-    /// 採用するリンクの理由
+    /// Reason for the adopted link
     #[arg(
         long,
-        value_name = "理由",
+        value_name = "REASON",
         requires = "adopt",
         // 別の操作が選ばれていると `requires` だけでは弾けないので、並べて排他にする
         conflicts_with_all = ["worker", "reembed", "backup", "inbox", "show", "similar", "review", "promote", "delete", "reject", "undecide", "merge", "failed", "retry", "retry_all", "discard", "skill_export"]
     )]
     reason: Option<String>,
 
-    /// 提案を却下する
-    #[arg(long, value_name = "キー")]
+    /// Reject a proposal
+    #[arg(long, value_name = "KEY")]
     reject: Option<String>,
 
-    /// 提案への判断を外す
-    #[arg(long, value_name = "キー")]
+    /// Clear the decision on a proposal
+    #[arg(long, value_name = "KEY")]
     undecide: Option<String>,
 
-    /// 採用した提案を main に取り込み、却下したものを捨てる。`--yes` が要る
+    /// Merge adopted proposals into main and drop rejected ones. Needs `--yes`
     #[arg(long)]
     merge: bool,
 
-    /// 失敗したジョブの一覧
+    /// List failed jobs
     #[arg(long)]
     failed: bool,
 
-    /// 失敗したジョブ 1 件をやり直す (id は `--failed` に出る)
+    /// Retry one failed job (ids are shown by `--failed`)
     #[arg(long, value_name = "ID")]
     retry: Option<String>,
 
-    /// 失敗したジョブをすべてやり直す
+    /// Retry all failed jobs
     #[arg(long)]
     retry_all: bool,
 
-    /// 失敗したジョブ 1 件を捨てる。`--yes` が要る
+    /// Discard one failed job. Needs `--yes`
     #[arg(long, value_name = "ID")]
     discard: Option<String>,
 
-    /// エージェント向けの skill (SKILL.md) をそのディレクトリに書き出す (なければ作る)
-    #[arg(long, value_name = "ディレクトリ")]
+    /// Write the agent skill (SKILL.md) into the directory (created if missing)
+    #[arg(long, value_name = "DIR")]
     skill_export: Option<String>,
 
-    /// `--skill-export` で、すでにある SKILL.md を上書きする
+    /// Overwrite an existing SKILL.md with `--skill-export`
     #[arg(
         long,
         requires = "skill_export",
@@ -145,7 +145,7 @@ struct Cli {
     )]
     force: bool,
 
-    /// 消す・捨てる・マージするを確かめた上で行う
+    /// Confirm deleting, discarding, or merging
     #[arg(long)]
     yes: bool,
 }
@@ -291,11 +291,11 @@ fn dispatch(json: bool, action: Action) -> Result<(), Error> {
             use std::io::IsTerminal;
             if json {
                 return Err(Error::Invalid(
-                    "--json では TUI を起動できません。操作のオプションか本文を渡します".into(),
+                    "cannot start the TUI with --json; pass an action option or a note body".into(),
                 ));
             }
             if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-                return Err(Error::Invalid("TUI は端末で起動します".into()));
+                return Err(Error::Invalid("the TUI needs a terminal".into()));
             }
             let ctx = Ctx::from_env()?;
             crate::tui::run(ctx)
@@ -309,7 +309,7 @@ fn dispatch(json: bool, action: Action) -> Result<(), Error> {
             let ctx = Ctx::from_env()?;
             let count = reembed_all(&ctx)?;
             warn_worker(ops::start_worker(&ctx));
-            output(json, json!({"count": count}), &format!("{count} 件の埋め込みを積みました"));
+            output(json, json!({"count": count}), &format!("Queued {count} embeddings"));
             Ok(())
         }
         Action::Write(note) => write(json, note),
@@ -319,9 +319,9 @@ fn dispatch(json: bool, action: Action) -> Result<(), Error> {
         Action::Promote { slugs, title, body } => promote_notes(json, &slugs, &title, body),
         Action::Delete { slugs, yes } => delete_notes_cmd(json, &slugs, yes),
         Action::Review => review_list(json),
-        Action::Adopt { key, reason } => decide_cmd(json, &key, Some(Decision::Adopt { reason }), "採用しました"),
-        Action::Reject(key) => decide_cmd(json, &key, Some(Decision::Reject), "却下しました"),
-        Action::Undecide(key) => decide_cmd(json, &key, None, "判断を外しました"),
+        Action::Adopt { key, reason } => decide_cmd(json, &key, Some(Decision::Adopt { reason }), "Adopted"),
+        Action::Reject(key) => decide_cmd(json, &key, Some(Decision::Reject), "Rejected"),
+        Action::Undecide(key) => decide_cmd(json, &key, None, "Cleared the decision on"),
         Action::Merge { yes } => merge(json, yes),
         Action::Failed => failed_list(json),
         Action::Retry(id) => retry(json, &id),
@@ -379,12 +379,12 @@ fn inbox_list(json: bool) -> Result<(), Error> {
         })
         .collect();
     let human = if items.is_empty() {
-        "整理されていないメモはありません".to_string()
+        "Inbox is empty".to_string()
     } else {
         items
             .iter()
             .map(|i| {
-                let old = if i.is_old(now) { " (古い)" } else { "" };
+                let old = if i.is_old(now) { " (old)" } else { "" };
                 format!("{}  {}{}  {}", i.slug, kind_name(i.kind), old, one_line(&i.body))
             })
             .collect::<Vec<_>>()
@@ -425,7 +425,7 @@ fn parse_slugs(list: &str) -> Result<Vec<String>, Error> {
         }
     }
     if slugs.is_empty() {
-        return Err(Error::Invalid("スラッグがありません".to_string()));
+        return Err(Error::Invalid("no slugs given".to_string()));
     }
     Ok(slugs)
 }
@@ -441,7 +441,7 @@ fn promote_notes(json: bool, slugs: &str, title: &str, body: BodySource) -> Resu
     let body = match body {
         BodySource::Text(text) => text,
         BodySource::File(path) => std::fs::read_to_string(&path)
-            .map_err(|e| Error::Invalid(format!("本文のファイル '{path}' を読めません: {e}")))?,
+            .map_err(|e| Error::Invalid(format!("cannot read body file '{path}': {e}")))?,
     };
     let ctx = Ctx::from_env()?;
     let from = resolve_kinds(&ctx, &slugs)?;
@@ -454,21 +454,21 @@ fn promote_notes(json: bool, slugs: &str, title: &str, body: BodySource) -> Resu
         }
     }
     warn_worker(done.worker_warning);
-    output(json, json!({"slug": done.value}), &format!("昇格しました {}", done.value));
+    output(json, json!({"slug": done.value}), &format!("Promoted {}", done.value));
     Ok(())
 }
 
 /// `--delete <slug,...> --yes`
 fn delete_notes_cmd(json: bool, slugs: &str, yes: bool) -> Result<(), Error> {
     if !yes {
-        return Err(Error::Invalid("ノートを消すには --yes が要ります".to_string()));
+        return Err(Error::Invalid("deleting notes needs --yes".to_string()));
     }
     let slugs = parse_slugs(slugs)?;
     let ctx = Ctx::from_env()?;
     // 先にすべての種類を確かめる。知らないスラッグがあれば、何も消さない
     let notes = resolve_kinds(&ctx, &slugs)?;
     crate::notes::delete_notes(&ctx.og, &notes)?;
-    output(json, json!({"ok": true}), &format!("{} 件消しました", notes.len()));
+    output(json, json!({"ok": true}), &format!("Deleted {} note(s)", notes.len()));
     Ok(())
 }
 
@@ -478,9 +478,9 @@ fn review_list(json: bool) -> Result<(), Error> {
     let proposals = list_proposals(&ctx.og)?;
     let state = ReviewState::load(&ctx.paths.review_json())?;
     let mark = |d: Option<&Decision>| match d {
-        Some(Decision::Adopt { .. }) => "採用",
-        Some(Decision::Reject) => "却下",
-        None => "未判断",
+        Some(Decision::Adopt { .. }) => "adopted",
+        Some(Decision::Reject) => "rejected",
+        None => "undecided",
     };
     let mut values = Vec::new();
     let mut lines = Vec::new();
@@ -513,7 +513,7 @@ fn review_list(json: bool) -> Result<(), Error> {
         }
         lines.push(line);
     }
-    let human = if lines.is_empty() { "提案はありません".to_string() } else { lines.join("\n") };
+    let human = if lines.is_empty() { "No proposals".to_string() } else { lines.join("\n") };
     output(json, json!(values), &human);
     Ok(())
 }
@@ -537,7 +537,7 @@ fn decide_cmd(json: bool, key: &str, decision: Option<Decision>, done: &str) -> 
 /// `--merge --yes`
 fn merge(json: bool, yes: bool) -> Result<(), Error> {
     if !yes {
-        return Err(Error::Invalid("マージするには --yes が要ります".to_string()));
+        return Err(Error::Invalid("merging needs --yes".to_string()));
     }
     let ctx = Ctx::from_env()?;
     let done = ops::merge(&ctx)?;
@@ -545,7 +545,7 @@ fn merge(json: bool, yes: bool) -> Result<(), Error> {
     output(
         json,
         json!({"links": done.value.links, "hubs": done.value.hubs}),
-        &format!("マージしました (リンク {} 本、ハブ {} 件)", done.value.links, done.value.hubs),
+        &format!("Merged ({} links, {} hubs)", done.value.links, done.value.hubs),
     );
     Ok(())
 }
@@ -559,13 +559,13 @@ fn failed_list(json: bool) -> Result<(), Error> {
         .map(|e| json!({"id": e.id, "job": e.job.name(), "attempts": e.attempts, "last_error": e.last_error}))
         .collect();
     let human = if entries.is_empty() {
-        "失敗したジョブはありません".to_string()
+        "No failed jobs".to_string()
     } else {
         entries
             .iter()
             .map(|e| {
                 let error = e.last_error.as_deref().map(one_line).unwrap_or_default();
-                format!("{}  {}  {} 回  {error}", e.id, e.job.name(), e.attempts)
+                format!("{}  {}  {}x  {error}", e.id, e.job.name(), e.attempts)
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -579,7 +579,7 @@ fn retry(json: bool, id: &str) -> Result<(), Error> {
     let ctx = Ctx::from_env()?;
     let done = ops::retry(&ctx, id)?;
     warn_worker(done.worker_warning);
-    output(json, json!({"ok": true}), &format!("やり直しを積みました {id}"));
+    output(json, json!({"ok": true}), &format!("Queued a retry of {id}"));
     Ok(())
 }
 
@@ -588,25 +588,25 @@ fn retry_all(json: bool) -> Result<(), Error> {
     let ctx = Ctx::from_env()?;
     let done = ops::retry_all(&ctx)?;
     warn_worker(done.worker_warning);
-    output(json, json!({"ok": true}), &format!("{} 件のやり直しを積みました", done.value));
+    output(json, json!({"ok": true}), &format!("Queued {} retries", done.value));
     Ok(())
 }
 
 /// `--discard <id> --yes`
 fn discard(json: bool, id: &str, yes: bool) -> Result<(), Error> {
     if !yes {
-        return Err(Error::Invalid("失敗したジョブを捨てるには --yes が要ります".to_string()));
+        return Err(Error::Invalid("discarding a failed job needs --yes".to_string()));
     }
     let ctx = Ctx::from_env()?;
     ctx.queue.discard_failed(id)?;
-    output(json, json!({"ok": true}), &format!("捨てました {id}"));
+    output(json, json!({"ok": true}), &format!("Discarded {id}"));
     Ok(())
 }
 
 /// `--skill-export <dir> [--force]`。サーバーにも設定にも触らない。
 fn skill_export(json: bool, dir: &str, force: bool) -> Result<(), Error> {
     crate::skill::export(std::path::Path::new(dir), force)?;
-    output(json, json!({"ok": true}), &format!("skill を書き出しました {dir}/SKILL.md"));
+    output(json, json!({"ok": true}), &format!("Wrote the skill to {dir}/SKILL.md"));
     Ok(())
 }
 
@@ -630,7 +630,7 @@ fn similar(json: bool, slug: &str) -> Result<(), Error> {
     });
     let section = |title: &str, lines: Vec<String>| {
         if lines.is_empty() {
-            format!("{title}\n  (なし)")
+            format!("{title}\n  (none)")
         } else {
             format!("{title}\n{}", lines.join("\n"))
         }
@@ -663,9 +663,9 @@ fn similar(json: bool, slug: &str) -> Result<(), Error> {
 fn backup_now(json: bool) -> Result<(), Error> {
     let ctx = Ctx::from_env()?;
     match backup::run(&ctx, "backup")? {
-        Outcome::Committed => output(json, json!({"ok": true}), "バックアップしました"),
-        Outcome::NoChanges => output(json, json!({"ok": true}), "変更はありません"),
-        Outcome::NotConfigured => return Err(Error::Permanent("backup.repo が設定されていません".to_string())),
+        Outcome::Committed => output(json, json!({"ok": true}), "Backed up"),
+        Outcome::NoChanges => output(json, json!({"ok": true}), "No changes"),
+        Outcome::NotConfigured => return Err(Error::Permanent("backup.repo is not set".to_string())),
     }
     Ok(())
 }
@@ -680,12 +680,12 @@ fn write(json: bool, note: NewNote) -> Result<(), Error> {
     warn_worker(done.worker_warning);
     match done.value {
         WriteOutcome::Saved(slug) => {
-            output(json, json!({"slug": slug}), &format!("保存しました {slug}"));
+            output(json, json!({"slug": slug}), &format!("Saved {slug}"));
         }
         WriteOutcome::Queued(e) => {
             let human = match e {
-                Error::Transient(_) => "omnigraph-server に届かないので待ち行列に保存しました".to_string(),
-                _ => format!("書き込めなかったので待ち行列に保存しました: {e}"),
+                Error::Transient(_) => "omnigraph-server is unreachable; queued the note".to_string(),
+                _ => format!("Could not write; queued the note: {e}"),
             };
             output(json, json!({"queued": true}), &human);
         }

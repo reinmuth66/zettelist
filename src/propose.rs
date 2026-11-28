@@ -113,7 +113,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// 同じ組をもう一度書くと理由を上書きしてしまうので、すでにある組は書かない。
 pub fn propose_for(og: &Omnigraph, embedder: &dyn Embedder, cfg: &LinkConfig, slug: &str) -> Result<Proposed, Error> {
     let v = get_embedding(og, NoteKind::Permanent, slug)?
-        .ok_or_else(|| Error::Transient("埋め込みがまだありません".to_string()))?;
+        .ok_or_else(|| Error::Transient("the embedding does not exist yet".to_string()))?;
     ensure_review(og)?;
 
     // 既存のリンク先を除いても candidates 件残るよう、その分多めに引く (自分自身の 1 件も含む)

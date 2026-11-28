@@ -139,7 +139,7 @@ impl Keymap {
     /// 設定ファイルの `[keys]` からキー割り当てを作る。書かれた動作は既定を置き換え、衝突を検査する。
     pub fn from_config(val: &toml::Value) -> Result<Keymap, Error> {
         let Some(map) = val.as_table() else {
-            return Err(Error::Invalid("[keys] はテーブルにしてください".to_string()));
+            return Err(Error::Invalid("[keys] must be a table".to_string()));
         };
         let mut keymap = Keymap::default();
         for (section_name, section_val) in map {
@@ -150,24 +150,24 @@ impl Keymap {
                 "failed" => Some(Screen::Failed),
                 _ => {
                     return Err(Error::Invalid(format!(
-                        "[keys] の節 '{section_name}' はありません"
+                        "[keys] has no section '{section_name}'"
                     )))
                 }
             };
             let Some(actions) = section_val.as_table() else {
                 return Err(Error::Invalid(format!(
-                    "[keys.{section_name}] はテーブルにしてください"
+                    "[keys.{section_name}] must be a table"
                 )));
             };
             for (action_name, keys_val) in actions {
                 let action = parse_action(screen, action_name).ok_or_else(|| {
                     Error::Invalid(format!(
-                        "[keys.{section_name}] の動作 '{action_name}' はありません"
+                        "[keys.{section_name}] has no action '{action_name}'"
                     ))
                 })?;
                 let Some(keys) = keys_val.as_array() else {
                     return Err(Error::Invalid(format!(
-                        "[keys.{section_name}] の {action_name} は配列にしてください"
+                        "[keys.{section_name}] {action_name} must be an array"
                     )));
                 };
                 keymap
@@ -176,12 +176,12 @@ impl Keymap {
                 for item in keys {
                     let Some(raw) = item.as_str() else {
                         return Err(Error::Invalid(format!(
-                            "[keys.{section_name}] の {action_name} のキーは文字列にしてください"
+                            "[keys.{section_name}] {action_name}: keys must be strings"
                         )));
                     };
                     let seq = parse_key_seq(raw).map_err(|msg| {
                         Error::Invalid(format!(
-                            "[keys.{section_name}] の {action_name} のキー '{raw}' {msg}"
+                            "[keys.{section_name}] {action_name}: key '{raw}' {msg}"
                         ))
                     })?;
                     keymap.bindings.push(Binding { screen, seq, action });
@@ -315,8 +315,8 @@ fn parse_key_seq(raw: &str) -> Result<KeySeq, &'static str> {
             Ok(KeySeq::Single(c, m))
         }
         [a, b] => Ok(KeySeq::Pair(parse_single_key(a)?, parse_single_key(b)?)),
-        [] => Err("が空です"),
-        _ => Err("は 2 つまでの並びにしてください"),
+        [] => Err("is empty"),
+        _ => Err("must be at most 2 keys"),
     }
 }
 
@@ -339,13 +339,13 @@ fn parse_single_key(s: &str) -> Result<(KeyCode, KeyModifiers), &'static str> {
         if let (Some(c), None) = (chars.next(), chars.next()) {
             return Ok((KeyCode::Char(c), KeyModifiers::CONTROL));
         }
-        return Err("を読めません");
+        return Err("cannot be parsed");
     }
     let mut chars = s.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
         return Ok((KeyCode::Char(c), KeyModifiers::NONE));
     }
-    Err("を読めません")
+    Err("cannot be parsed")
 }
 
 fn action_name(action: Action) -> &'static str {
@@ -391,7 +391,7 @@ fn check_conflicts(bindings: &[Binding]) -> Result<(), Error> {
             for b2 in &active[i + 1..] {
                 if b1.seq == b2.seq {
                     return Err(Error::Invalid(format!(
-                        "{} 画面でキー '{}' が {} と {} で重なっています",
+                        "{} screen: key '{}' is bound to both {} and {}",
                         screen_name(screen),
                         format_seq(b1.seq),
                         action_name(b1.action),
@@ -405,7 +405,7 @@ fn check_conflicts(bindings: &[Binding]) -> Result<(), Error> {
                 };
                 if prefix_conflict {
                     return Err(Error::Invalid(format!(
-                        "{} 画面でキー '{}' ({}) と '{}' ({}) の先頭が重なっています",
+                        "{} screen: key '{}' ({}) is a prefix of '{}' ({})",
                         screen_name(screen),
                         format_seq(b1.seq),
                         action_name(b1.action),

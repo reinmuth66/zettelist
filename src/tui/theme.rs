@@ -35,12 +35,12 @@ impl Theme {
     /// 設定ファイルの `[theme]` から配色を作る。書かれていない項目は既定値を使う。
     pub fn from_config(val: &toml::Value) -> Result<Theme, Error> {
         let Some(map) = val.as_table() else {
-            return Err(Error::Invalid("[theme] はテーブルにしてください".to_string()));
+            return Err(Error::Invalid("[theme] must be a table".to_string()));
         };
         let mut theme = Theme::default();
         for (item, raw) in map {
             let value = raw.as_str().ok_or_else(|| {
-                Error::Invalid(format!("[theme] の {item} は文字列にしてください"))
+                Error::Invalid(format!("[theme] {item} must be a string"))
             })?;
             let target = match item.as_str() {
                 "cursor" => &mut theme.cursor,
@@ -52,7 +52,7 @@ impl Theme {
                 "error" => &mut theme.error,
                 "adopted" => &mut theme.adopted,
                 "rejected" => &mut theme.rejected,
-                _ => return Err(Error::Invalid(format!("[theme] の項目 '{item}' はありません"))),
+                _ => return Err(Error::Invalid(format!("[theme] has no item '{item}'"))),
             };
             *target = parse_color(item, value)?;
         }
@@ -80,7 +80,7 @@ fn parse_color(item: &str, name: &str) -> Result<Color, Error> {
         "bright_white" => Ok(Color::White),
         "default" => Ok(Color::Reset),
         _ => Err(Error::Invalid(format!(
-            "[theme] の {item} の色 '{name}' は使えません"
+            "[theme] {item}: unknown color '{name}'"
         ))),
     }
 }

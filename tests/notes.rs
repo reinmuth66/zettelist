@@ -145,7 +145,7 @@ fn unknown_slug_is_rejected_and_writes_nothing() {
     let og = s.og();
     let e = write_note(&og, &note("本文", Some("nosuch"), None, at_ten())).unwrap_err();
     assert!(matches!(e, Error::Invalid(_)), "{e:?}");
-    assert_eq!(e.to_string(), "出典 'nosuch' は登録されていません");
+    assert_eq!(e.to_string(), "source 'nosuch' is not registered");
     assert_eq!(count(&og, "Fleeting"), 0);
     assert_eq!(count(&og, "Literature"), 0);
 }
@@ -156,7 +156,7 @@ fn blank_body_is_rejected() {
     let og = s.og();
     let e = write_note(&og, &note(" \n\t ", None, None, at_ten())).unwrap_err();
     assert!(matches!(e, Error::Invalid(_)), "{e:?}");
-    assert_eq!(e.to_string(), "本文が空です");
+    assert_eq!(e.to_string(), "the body is empty");
     assert_eq!(count(&og, "Fleeting"), 0);
 }
 
@@ -365,7 +365,7 @@ fn promote_rejects_already_promoted_notes() {
         vec![(NoteKind::Fleeting, fresh.slug.clone()), (NoteKind::Fleeting, f.slug.clone())],
     ] {
         let e = promote(&og, &again, "題2", "本文2", at(12, 0)).unwrap_err();
-        assert!(matches!(&e, Error::Invalid(m) if m.contains("昇格済み")), "{e:?}");
+        assert!(matches!(&e, Error::Invalid(m) if m.contains("already promoted")), "{e:?}");
     }
     assert_eq!(count(&og, "Permanent"), 1);
     assert_eq!(inbox(&og).unwrap().len(), 1);

@@ -106,9 +106,9 @@ pub enum ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConfigError::Parse(e) => write!(f, "設定ファイルを読めません: {e}"),
-            ConfigError::Io(e) => write!(f, "設定ファイルを開けません: {e}"),
-            ConfigError::NoHome => write!(f, "ホームディレクトリが分かりません (HOME が未設定)"),
+            ConfigError::Parse(e) => write!(f, "cannot parse the config file: {e}"),
+            ConfigError::Io(e) => write!(f, "cannot open the config file: {e}"),
+            ConfigError::NoHome => write!(f, "cannot find the home directory (HOME is not set)"),
         }
     }
 }

@@ -77,7 +77,7 @@ fn json_failure_is_json_on_stderr_with_exit_one() {
     assert_eq!(output.status.code(), Some(1));
     let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
     assert_eq!(err["kind"], "permanent");
-    assert!(err["error"].as_str().unwrap().contains("backup.repo が設定されていません"), "{err}");
+    assert!(err["error"].as_str().unwrap().contains("backup.repo is not set"), "{err}");
 }
 
 #[test]
@@ -262,7 +262,7 @@ fn show_unknown_is_invalid() {
     assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
     let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
     assert_eq!(err["kind"], "invalid");
-    assert!(err["error"].as_str().unwrap().contains("ノート 'nosuch' はありません"), "{err}");
+    assert!(err["error"].as_str().unwrap().contains("note 'nosuch' does not exist"), "{err}");
 }
 
 #[test]
@@ -591,7 +591,7 @@ fn promote_already_promoted_is_invalid() {
     assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
     let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
     assert_eq!(err["kind"], "invalid");
-    assert!(err["error"].as_str().unwrap().contains("昇格済み"), "{err}");
+    assert!(err["error"].as_str().unwrap().contains("already promoted"), "{err}");
     let count = og
         .query("main", "query q() { match { $n: Permanent } return { $n.slug as slug } }", serde_json::json!({}))
         .unwrap()
@@ -773,7 +773,7 @@ fn unknown_key_is_invalid() {
         assert_eq!(output.status.code(), Some(2), "{flag}: {}", String::from_utf8_lossy(&output.stderr));
         let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
         assert_eq!(err["kind"], "invalid");
-        assert!(err["error"].as_str().unwrap().contains("提案 'link:x:y' はありません"), "{err}");
+        assert!(err["error"].as_str().unwrap().contains("no proposal 'link:x:y'"), "{err}");
         assert!(output.stdout.is_empty());
     }
     assert_eq!(std::fs::read(review_json_path(dir.path())).unwrap(), before);
@@ -883,7 +883,7 @@ fn failed_with_no_entries_is_empty_list() {
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), serde_json::json!([]));
     let output = zl(dir.path()).arg("--failed").output().unwrap();
     assert!(output.status.success());
-    assert!(String::from_utf8(output.stdout).unwrap().contains("失敗したジョブはありません"));
+    assert!(String::from_utf8(output.stdout).unwrap().contains("No failed jobs"));
 }
 
 #[test]
@@ -959,7 +959,7 @@ fn retry_unknown_is_invalid() {
     assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
     let err = stderr_json(&output);
     assert_eq!(err["kind"], "invalid");
-    assert!(err["error"].as_str().unwrap().contains("ありません"), "{err}");
+    assert!(err["error"].as_str().unwrap().contains("no failed job"), "{err}");
     assert!(output.stdout.is_empty());
     assert_eq!(failed_ids(dir.path()), ids);
     assert!(pending(dir.path()).is_empty());
@@ -1089,6 +1089,6 @@ fn json_without_action_is_an_error_not_success() {
     assert_eq!(output.status.code(), Some(2), "{}", String::from_utf8_lossy(&output.stderr));
     let err: serde_json::Value = serde_json::from_slice(&output.stderr).expect("stderr は JSON のはず");
     assert_eq!(err["kind"], "invalid");
-    assert!(err["error"].as_str().is_some_and(|m| m.contains("TUI を起動できません")), "{err}");
+    assert!(err["error"].as_str().is_some_and(|m| m.contains("cannot start the TUI")), "{err}");
     assert!(output.stdout.is_empty());
 }

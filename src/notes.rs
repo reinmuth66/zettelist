@@ -98,7 +98,7 @@ fn find_slot(og: &Omnigraph, note: &NewNote, created_iso: &str) -> Result<Slot, 
 
 /// 出典の指定から、Cites の宛先の Source の ID と、新しく作る Source の行 (あれば) を決める。
 fn resolve_source(og: &Omnigraph, raw: &str) -> Result<(String, Option<Value>), Error> {
-    let not_registered = || Error::Invalid(format!("出典 '{raw}' は登録されていません"));
+    let not_registered = || Error::Invalid(format!("source '{raw}' is not registered"));
     match SourceRef::parse(raw) {
         SourceRef::Slug(slug) => {
             // slug が "" の仮の Source に当たらないよう、空の指定は登録なしとして扱う
@@ -133,7 +133,7 @@ fn resolve_source(og: &Omnigraph, raw: &str) -> Result<(String, Option<Value>), 
 /// ノートを 1 件書く。出典なしは Fleeting、出典ありは Literature と Cites。
 pub fn write_note(og: &Omnigraph, note: &NewNote) -> Result<Written, Error> {
     if note.body.trim().is_empty() {
-        return Err(Error::Invalid("本文が空です".to_string()));
+        return Err(Error::Invalid("the body is empty".to_string()));
     }
     // 出典の確認を先にして、登録されていない出典なら何も書かない
     let source = match &note.source {
@@ -211,9 +211,9 @@ fn text(r: &Map<String, Value>, key: &str) -> Option<String> {
 fn item_of(kind: NoteKind, r: &Map<String, Value>) -> Result<InboxItem, Error> {
     let created = text(r, "created")
         .and_then(|s| parse_created(&s))
-        .ok_or_else(|| Error::Permanent(format!("created を読めません: {r:?}")))?
+        .ok_or_else(|| Error::Permanent(format!("cannot read created: {r:?}")))?
         .and_utc();
-    let slug = text(r, "slug").ok_or_else(|| Error::Permanent(format!("slug がありません: {r:?}")))?;
+    let slug = text(r, "slug").ok_or_else(|| Error::Permanent(format!("missing slug: {r:?}")))?;
     Ok(InboxItem {
         kind,
         slug,
@@ -271,7 +271,7 @@ pub fn inbox_embeddings(og: &Omnigraph) -> Result<HashMap<(NoteKind, String), Ve
             let Some(value) = r.get("embedding").filter(|v| !v.is_null()) else {
                 continue;
             };
-            let slug = text(&r, "slug").ok_or_else(|| Error::Permanent(format!("slug がありません: {r:?}")))?;
+            let slug = text(&r, "slug").ok_or_else(|| Error::Permanent(format!("missing slug: {r:?}")))?;
             out.insert((kind, slug), parse_vector(value)?);
         }
     }
@@ -319,17 +319,17 @@ pub fn promote(
     created: DateTime<chrono::Local>,
 ) -> Result<String, Error> {
     if title.trim().is_empty() {
-        return Err(Error::Invalid("題名が空です".to_string()));
+        return Err(Error::Invalid("the title is empty".to_string()));
     }
     if body.trim().is_empty() {
-        return Err(Error::Invalid("本文が空です".to_string()));
+        return Err(Error::Invalid("the body is empty".to_string()));
     }
     if from.is_empty() {
-        return Err(Error::Invalid("昇格元のノートがありません".to_string()));
+        return Err(Error::Invalid("no source notes to promote".to_string()));
     }
     // Permanent から Permanent は DerivedFrom で結べない
     if from.iter().any(|(kind, _)| *kind == NoteKind::Permanent) {
-        return Err(Error::Invalid("Permanent は昇格元にできません".to_string()));
+        return Err(Error::Invalid("a permanent note cannot be promoted".to_string()));
     }
 
     // `write_note` と同じロックを、空き slug の探索から load まで持つ
@@ -344,7 +344,7 @@ pub fn promote(
             "query q($s: String) {{ match {{ $n: {node} {{ slug: $s }} $p: Permanent $p {edge} $n }} return {{ $p.slug as p }} }}"
         );
         if !og.query(BRANCH, &q, json!({ "s": from_slug }))?.is_empty() {
-            return Err(Error::Invalid(format!("ノート '{from_slug}' は昇格済みです")));
+            return Err(Error::Invalid(format!("note '{from_slug}' is already promoted")));
         }
     }
     let mut t = created.naive_local();
@@ -417,7 +417,7 @@ pub fn get_embedding(og: &Omnigraph, kind: NoteKind, slug: &str) -> Result<Optio
 }
 
 fn parse_vector(value: &Value) -> Result<Vec<f32>, Error> {
-    let bad = || Error::Permanent(format!("埋め込みを読めません: {value}"));
+    let bad = || Error::Permanent(format!("cannot read the embedding: {value}"));
     value
         .as_array()
         .ok_or_else(bad)?
@@ -464,8 +464,8 @@ pub fn nearest(
             let distance = r
                 .get("distance")
                 .and_then(Value::as_f64)
-                .ok_or_else(|| Error::Permanent(format!("distance を読めません: {r:?}")))?;
-            let slug = text(&r, "slug").ok_or_else(|| Error::Permanent(format!("slug がありません: {r:?}")))?;
+                .ok_or_else(|| Error::Permanent(format!("cannot read distance: {r:?}")))?;
+            let slug = text(&r, "slug").ok_or_else(|| Error::Permanent(format!("missing slug: {r:?}")))?;
             found.push(Near {
                 kind,
                 slug,
@@ -506,7 +506,7 @@ pub fn show_note(og: &Omnigraph, slug: &str) -> Result<Note, Error> {
         let Some(r) = rows.first() else { continue };
         let created = text(r, "created")
             .and_then(|s| parse_created(&s))
-            .ok_or_else(|| Error::Permanent(format!("created を読めません: {r:?}")))?
+            .ok_or_else(|| Error::Permanent(format!("cannot read created: {r:?}")))?
             .and_utc();
         return Ok(Note {
             kind,
@@ -516,5 +516,5 @@ pub fn show_note(og: &Omnigraph, slug: &str) -> Result<Note, Error> {
             created,
         });
     }
-    Err(Error::Invalid(format!("ノート '{slug}' はありません")))
+    Err(Error::Invalid(format!("note '{slug}' does not exist")))
 }

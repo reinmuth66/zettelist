@@ -61,7 +61,7 @@ pub struct ReviewState {
 }
 
 fn io_err(what: &str, path: &Path, e: std::io::Error) -> Error {
-    Error::Permanent(format!("{what}に失敗しました ({}): {e}", path.display()))
+    Error::Permanent(format!("failed to {what} ({}): {e}", path.display()))
 }
 
 impl ReviewState {
@@ -69,9 +69,9 @@ impl ReviewState {
     pub fn load(path: &Path) -> Result<ReviewState, Error> {
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| Error::Permanent(format!("{} を読めません: {e}", path.display()))),
+                .map_err(|e| Error::Permanent(format!("cannot read {}: {e}", path.display()))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ReviewState::default()),
-            Err(e) => Err(io_err("読み込み", path, e)),
+            Err(e) => Err(io_err("read", path, e)),
         }
     }
 
@@ -81,12 +81,12 @@ impl ReviewState {
             Some(d) if !d.as_os_str().is_empty() => d,
             _ => Path::new("."),
         };
-        std::fs::create_dir_all(dir).map_err(|e| io_err("ディレクトリの作成", dir, e))?;
+        std::fs::create_dir_all(dir).map_err(|e| io_err("create the directory", dir, e))?;
         let json = serde_json::to_vec_pretty(self)
-            .map_err(|e| Error::Permanent(format!("レビューの状態を JSON にできません: {e}")))?;
-        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| io_err("一時ファイルの作成", dir, e))?;
-        tmp.write_all(&json).map_err(|e| io_err("一時ファイルへの書き込み", tmp.path(), e))?;
-        tmp.as_file().sync_all().map_err(|e| io_err("一時ファイルの同期", tmp.path(), e))?;
+            .map_err(|e| Error::Permanent(format!("cannot serialize the review state to JSON: {e}")))?;
+        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| io_err("create a temporary file", dir, e))?;
+        tmp.write_all(&json).map_err(|e| io_err("write the temporary file", tmp.path(), e))?;
+        tmp.as_file().sync_all().map_err(|e| io_err("sync the temporary file", tmp.path(), e))?;
         tmp.persist(path).map_err(|e| io_err("rename", path, e.error))?;
         Ok(())
     }
@@ -325,7 +325,7 @@ pub fn decide(
 ) -> Result<(), Error> {
     let _lock = lock_review(lock_path)?;
     if !list_proposals(og)?.iter().any(|p| p.key() == key) {
-        return Err(Error::Invalid(format!("提案 '{key}' はありません")));
+        return Err(Error::Invalid(format!("no proposal '{key}'")));
     }
     let mut state = ReviewState::load(state_path)?;
     match decision {
@@ -383,17 +383,17 @@ pub fn rehub(og: &Omnigraph, state_path: &Path, lock_path: &Path, key: &str, hub
         Proposal::Hub { hub: h, note: n } if p.key() == key => Some((h.clone(), n.clone())),
         _ => None,
     }) else {
-        return Err(Error::Invalid(format!("Hub の提案 '{key}' はありません")));
+        return Err(Error::Invalid(format!("no hub proposal '{key}'")));
     };
     let (_, hubs_in_main) = main_nodes(og)?;
     if !hubs_in_main.contains(hub) {
-        return Err(Error::Invalid(format!("Hub '{hub}' はありません")));
+        return Err(Error::Invalid(format!("no hub '{hub}'")));
     }
     if hub == old_hub {
-        return Err(Error::Invalid("元と同じ Hub です".to_string()));
+        return Err(Error::Invalid("it is the same hub as before".to_string()));
     }
     if includes_on(og, MAIN)?.iter().any(|(h, n)| h == hub && n == &note) {
-        return Err(Error::Invalid("すでにその Hub に入っています".to_string()));
+        return Err(Error::Invalid("the note is already in that hub".to_string()));
     }
 
     let mut state = ReviewState::load(state_path)?;

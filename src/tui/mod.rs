@@ -46,9 +46,9 @@ pub fn run(ctx: Ctx) -> Result<(), Error> {
     loop {
         terminal
             .draw(|f| view::draw(f, &app))
-            .map_err(|e| Error::Permanent(format!("画面の描画に失敗しました: {e}")))?;
+            .map_err(|e| Error::Permanent(format!("could not draw the screen: {e}")))?;
 
-        let ev = event::read().map_err(|e| Error::Permanent(format!("キーの読み込みに失敗しました: {e}")))?;
+        let ev = event::read().map_err(|e| Error::Permanent(format!("could not read a key: {e}")))?;
         match ev {
             Event::Key(key) => {
                 if key.kind == KeyEventKind::Release {
@@ -85,10 +85,10 @@ fn edit_in_editor(draft: &str) -> Result<String, String> {
     let mut tmp = tempfile::Builder::new()
         .suffix(".md")
         .tempfile()
-        .map_err(|e| format!("一時ファイルを作れませんでした: {e}"))?;
+        .map_err(|e| format!("could not create a temporary file: {e}"))?;
     tmp.write_all(draft.as_bytes())
         .and_then(|_| tmp.flush())
-        .map_err(|e| format!("一時ファイルに書けませんでした: {e}"))?;
+        .map_err(|e| format!("could not write the temporary file: {e}"))?;
 
     let editor = std::env::var("EDITOR")
         .ok()
@@ -97,7 +97,7 @@ fn edit_in_editor(draft: &str) -> Result<String, String> {
 
     run_editor(&editor, tmp.path())?;
 
-    std::fs::read_to_string(tmp.path()).map_err(|e| format!("一時ファイルを読めませんでした: {e}"))
+    std::fs::read_to_string(tmp.path()).map_err(|e| format!("could not read the temporary file: {e}"))
 }
 
 fn run_editor(editor: &str, path: &Path) -> Result<(), String> {
@@ -107,10 +107,10 @@ fn run_editor(editor: &str, path: &Path) -> Result<(), String> {
         .arg("sh")
         .arg(path)
         .status()
-        .map_err(|e| format!("{editor} を起動できませんでした: {e}"))?;
+        .map_err(|e| format!("could not start {editor}: {e}"))?;
 
     if !status.success() {
-        return Err(format!("{editor} が異常終了しました ({status})"));
+        return Err(format!("{editor} exited abnormally ({status})"));
     }
     Ok(())
 }
@@ -128,7 +128,7 @@ fn open_url(url: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("{cmd} を起動できませんでした: {e}"))
+        .map_err(|e| format!("could not start {cmd}: {e}"))
 }
 
 #[cfg(test)]

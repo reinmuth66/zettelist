@@ -37,33 +37,33 @@ impl Embedder for OllamaEmbedder {
         let mut resp = agent
             .post(&url)
             .send_json(json!({ "model": self.model, "input": text }))
-            .map_err(|e| Error::Transient(format!("Ollama ({url}) に届きません: {e}")))?;
+            .map_err(|e| Error::Transient(format!("cannot reach Ollama ({url}): {e}")))?;
         let status = resp.status().as_u16();
         if status >= 500 {
-            return Err(Error::Transient(format!("Ollama が {status} を返しました")));
+            return Err(Error::Transient(format!("Ollama returned {status}")));
         }
         if status >= 400 {
             let detail = resp.body_mut().read_to_string().unwrap_or_default();
-            let message = format!("Ollama が {status} を返しました: {detail}");
+            let message = format!("Ollama returned {status}: {detail}");
             // 408 (タイムアウト) と 429 (制限) は待てば通る。モデル未取得の 404 などは直すまで通らない。
             return Err(if status == 408 || status == 429 { Error::Transient(message) } else { Error::Permanent(message) });
         }
         let body: Value = resp.body_mut().read_json().map_err(|e| match e {
             // 中身が JSON でないのは Ollama 側の仕様のずれ。読み込みの途中で切れた、時間切れなどは再試行で通りうる。
-            ureq::Error::Json(_) => Error::Permanent(format!("Ollama の応答を読めません: {e}")),
-            _ => Error::Transient(format!("Ollama の応答を読めません: {e}")),
+            ureq::Error::Json(_) => Error::Permanent(format!("cannot read the Ollama response: {e}")),
+            _ => Error::Transient(format!("cannot read the Ollama response: {e}")),
         })?;
         let vector = body
             .pointer("/data/0/embedding")
             .and_then(Value::as_array)
-            .ok_or_else(|| Error::Permanent(format!("Ollama の応答に embedding がありません: {body}")))?
+            .ok_or_else(|| Error::Permanent(format!("the Ollama response has no embedding: {body}")))?
             .iter()
             .map(|x| x.as_f64().map(|f| f as f32))
             .collect::<Option<Vec<f32>>>()
-            .ok_or_else(|| Error::Permanent("Ollama の embedding に数値でない要素があります".to_string()))?;
+            .ok_or_else(|| Error::Permanent("the Ollama embedding has a non-numeric element".to_string()))?;
         if vector.len() != DIMENSION {
             return Err(Error::Permanent(format!(
-                "埋め込みの次元が {DIMENSION} ではありません ({})。embed.model を確かめてください",
+                "embedding dimension is not {DIMENSION} ({}); check embed.model",
                 vector.len()
             )));
         }
@@ -163,7 +163,7 @@ mod tests {
         let e = embedder(&fake.base).embed("x").unwrap_err();
         assert!(matches!(e, Error::Permanent(_)), "{e:?}");
         assert!(e.to_string().contains("1024"), "{e}");
-        assert_eq!(e.to_string(), "埋め込みの次元が 1024 ではありません (3)。embed.model を確かめてください");
+        assert_eq!(e.to_string(), "embedding dimension is not 1024 (3); check embed.model");
         fake.finish();
     }
 
